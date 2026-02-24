@@ -1,0 +1,51 @@
+{
+  "name": "@git-fabric/chat",
+  "version": "0.1.0",
+  "description": "Chat fabric app — AI conversation sessions, semantic history search, and context threading as a composable MCP layer",
+  "author": "git-fabric",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/git-fabric/chat.git"
+  },
+  "keywords": [
+    "chat",
+    "ai",
+    "mcp",
+    "model-context-protocol",
+    "git-fabric",
+    "anthropic",
+    "qdrant",
+    "semantic-search"
+  ],
+  "type": "module",
+  "bin": {
+    "fabric-chat": "./bin/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "bin/",
+    "dist/"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "lint": "eslint src/",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.0",
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "openai": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0",
+    "vitest": "^4.0.18"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
