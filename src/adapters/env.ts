@@ -5,10 +5,9 @@
  * Used by the CLI, the gateway loader, and direct programmatic use.
  *
  * Required env vars:
- *   ANTHROPIC_API_KEY   — Claude completions
- *   OPENAI_API_KEY      — text-embedding-3-small (1536 dims)
- *   QDRANT_URL          — Qdrant Cloud cluster URL
- *   QDRANT_API_KEY      — Qdrant Cloud API key
+ *   ANTHROPIC_API_KEY   — Claude completions + voyage-3-lite embeddings
+ *   QDRANT_URL          — Qdrant instance URL (cloud or in-cluster)
+ *   QDRANT_API_KEY      — Qdrant API key (omit for in-cluster no-auth)
  *   GITHUB_TOKEN        — state repo read/write access
  *
  * Optional:
@@ -16,7 +15,6 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import OpenAI from "openai";
 import { randomUUID } from "crypto";
 import type {
   ChatAdapter,
@@ -34,8 +32,8 @@ import type {
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const QDRANT_COLLECTION = "chat_fabric__messages__v1";
-const EMBEDDING_MODEL = "text-embedding-3-small";
-const EMBEDDING_DIMS = 1536;
+const EMBEDDING_MODEL = "voyage-3-lite";
+const EMBEDDING_DIMS = 512;
 const DEFAULT_MODEL: ChatModel = "claude-sonnet-4-6";
 const STATE_REPO_DEFAULT = "ry-ops/git-steer-state";
 
@@ -359,20 +357,39 @@ function isoToday(): string {
   return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 }
 
+// ── Voyage AI embeddings (via Anthropic API key) ─────────────────────────────
+
+async function voyageEmbed(anthropicKey: string, text: string): Promise<number[]> {
+  const res = await fetch("https://api.voyageai.com/v1/embeddings", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${anthropicKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      input: [text],
+      model: EMBEDDING_MODEL,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Voyage embed failed (${res.status}): ${body}`);
+  }
+  const data = await res.json() as { data: { embedding: number[] }[] };
+  return data.data[0].embedding;
+}
+
 // ── createAdapterFromEnv ─────────────────────────────────────────────────────
 
 export function createAdapterFromEnv(): ChatAdapter {
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   if (!anthropicKey) throw new Error("ANTHROPIC_API_KEY required");
 
-  const openaiKey = process.env.OPENAI_API_KEY;
-  if (!openaiKey) throw new Error("OPENAI_API_KEY required");
-
   const qdrantUrl = process.env.QDRANT_URL;
   if (!qdrantUrl) throw new Error("QDRANT_URL required");
 
-  const qdrantKey = process.env.QDRANT_API_KEY;
-  if (!qdrantKey) throw new Error("QDRANT_API_KEY required");
+  // QDRANT_API_KEY is optional for in-cluster no-auth deployments
+  const qdrantKey = process.env.QDRANT_API_KEY ?? "";
 
   const githubToken = process.env.GITHUB_TOKEN;
   if (!githubToken) throw new Error("GITHUB_TOKEN required");
@@ -381,7 +398,6 @@ export function createAdapterFromEnv(): ChatAdapter {
     process.env.GITHUB_STATE_REPO ?? STATE_REPO_DEFAULT;
 
   const anthropic = new Anthropic({ apiKey: anthropicKey });
-  const openai = new OpenAI({ apiKey: openaiKey });
 
   // Lazy collection creation — only on first embedAndStore/search
   let collectionReady = false;
@@ -616,22 +632,15 @@ export function createAdapterFromEnv(): ChatAdapter {
     // ── Semantic search ───────────────────────────────────────────────────────
 
     async embed(text) {
-      const res = await openai.embeddings.create({
-        model: EMBEDDING_MODEL,
-        input: text,
-      });
-      return res.data[0].embedding;
+      return voyageEmbed(anthropicKey, text);
     },
 
     async embedAndStore(message) {
       await ensureCollection();
-      const vector = await openai.embeddings.create({
-        model: EMBEDDING_MODEL,
-        input: message.content,
-      });
+      const vector = await voyageEmbed(anthropicKey, message.content);
       await qdrantUpsert(qdrantUrl, qdrantKey, {
         id: message.id,
-        vector: vector.data[0].embedding,
+        vector,
         payload: {
           sessionId: message.sessionId,
           role: message.role,
