@@ -52,23 +52,11 @@ function buildServer() {
   return server;
 }
 
-/** Buffer a request body and parse as JSON. */
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => {
-      try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
-      catch { resolve(undefined); }
-    });
-    req.on("error", reject);
-  });
-}
-
 const httpPort = process.env.MCP_HTTP_PORT ? Number(process.env.MCP_HTTP_PORT) : null;
 
 if (httpPort) {
   // In-cluster mode: stateless StreamableHTTP on MCP_HTTP_PORT
+  // SDK 1.9+ uses Hono internally and parses the body itself — pass undefined
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   const server = buildServer();
   await server.connect(transport);
@@ -79,8 +67,7 @@ if (httpPort) {
       return;
     }
     if (req.url === "/mcp" || req.url === "/") {
-      const body = await readBody(req);
-      await transport.handleRequest(req, res, body);
+      await transport.handleRequest(req, res, undefined);
       return;
     }
     res.writeHead(404).end("not found");
