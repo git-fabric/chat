@@ -3,6 +3,8 @@
  *
  * Message send/receive: complete a turn, list messages, inject context.
  * Handles full Anthropic API round-trip with session history reconstruction.
+ * When a fabric gateway is configured, uses Claude tool_use to query live
+ * infrastructure data (k8s, unifi, proxmox, sandfly, cve, cloudflare, tailscale).
  *
  * Inputs:  ChatAdapter + message params
  * Outputs: ChatMessage objects / send results

@@ -3,16 +3,20 @@
  *
  * Message send/receive: complete a turn, list messages, inject context.
  * Handles full Anthropic API round-trip with session history reconstruction.
+ * When a fabric gateway is configured, uses Claude tool_use to query live
+ * infrastructure data (k8s, unifi, proxmox, sandfly, cve, cloudflare, tailscale).
  *
  * Inputs:  ChatAdapter + message params
  * Outputs: ChatMessage objects / send results
  */
 
+import Anthropic from "@anthropic-ai/sdk";
 import type {
   ChatAdapter,
   ChatMessage,
   ChatModel,
   CompletionMessage,
+  FabricTool,
 } from "../types.js";
 
 export interface SendResult {
@@ -23,6 +27,99 @@ export interface SendResult {
   outputTokens: number;
   model: ChatModel;
 }
+
+// ── Anthropic tool conversion ─────────────────────────────────────────────────
+
+function fabricToolToAnthropic(tool: FabricTool): Anthropic.Tool {
+  return {
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.inputSchema as Anthropic.Tool["input_schema"],
+  };
+}
+
+// ── Agentic loop with fabric tool_use ─────────────────────────────────────────
+
+async function completeWithTools(
+  anthropic: Anthropic,
+  model: ChatModel,
+  systemPrompt: string | undefined,
+  history: Array<Anthropic.MessageParam>,
+  tools: Anthropic.Tool[],
+  callTool: (name: string, args: Record<string, unknown>) => Promise<unknown>,
+  maxTokens: number,
+): Promise<{ content: string; inputTokens: number; outputTokens: number }> {
+  let totalInput = 0;
+  let totalOutput = 0;
+  let messages = [...history];
+
+  // Up to 10 tool-call rounds to prevent infinite loops
+  for (let round = 0; round < 10; round++) {
+    const response = await anthropic.messages.create({
+      model,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      tools,
+      messages,
+    });
+
+    totalInput += response.usage.input_tokens;
+    totalOutput += response.usage.output_tokens;
+
+    if (response.stop_reason === "end_turn" || response.stop_reason === "max_tokens") {
+      // Extract final text content
+      const textBlock = response.content.find((b) => b.type === "text");
+      const content = textBlock && textBlock.type === "text" ? textBlock.text : "";
+      return { content, inputTokens: totalInput, outputTokens: totalOutput };
+    }
+
+    if (response.stop_reason === "tool_use") {
+      // Append assistant message with tool use blocks
+      messages.push({ role: "assistant", content: response.content });
+
+      // Execute all tool calls in parallel
+      const toolUseBlocks = response.content.filter(
+        (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
+      );
+
+      const toolResults = await Promise.all(
+        toolUseBlocks.map(async (block) => {
+          try {
+            const result = await callTool(
+              block.name,
+              block.input as Record<string, unknown>,
+            );
+            return {
+              type: "tool_result" as const,
+              tool_use_id: block.id,
+              content: JSON.stringify(result),
+            };
+          } catch (err) {
+            return {
+              type: "tool_result" as const,
+              tool_use_id: block.id,
+              is_error: true,
+              content: `Tool error: ${String(err)}`,
+            };
+          }
+        }),
+      );
+
+      // Append tool results and continue
+      messages.push({ role: "user", content: toolResults });
+      continue;
+    }
+
+    // Unknown stop_reason — return whatever text we have
+    const textBlock = response.content.find((b) => b.type === "text");
+    const content = textBlock && textBlock.type === "text" ? textBlock.text : "";
+    return { content, inputTokens: totalInput, outputTokens: totalOutput };
+  }
+
+  throw new Error("Agentic loop exceeded 10 rounds without finishing");
+}
+
+// ── sendMessage ───────────────────────────────────────────────────────────────
 
 export async function sendMessage(
   adapter: ChatAdapter,
@@ -53,27 +150,73 @@ export async function sendMessage(
   }
 
   // Build message history for Anthropic
-  // Include all prior messages + the new user message
-  const history: CompletionMessage[] = [
+  const history: Anthropic.MessageParam[] = [
     ...session.messages
       .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+      .map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: m.content,
+      })),
     { role: "user", content },
   ];
 
-  // Complete
-  const result = await adapter.complete(history, {
-    model: session.model,
-    systemPrompt: session.systemPrompt,
-    maxTokens,
-  });
+  // Determine if fabric tools are available
+  const hasFabricGateway =
+    typeof adapter.listFabricTools === "function" &&
+    typeof adapter.callFabricTool === "function";
+
+  let result: { content: string; inputTokens: number; outputTokens: number };
+
+  if (hasFabricGateway) {
+    // Fetch available tools from the gateway (best-effort — fall back to plain if fails)
+    let fabricTools: FabricTool[] = [];
+    try {
+      fabricTools = await adapter.listFabricTools!();
+    } catch {
+      // Gateway unreachable — proceed without tools
+    }
+
+    if (fabricTools.length > 0) {
+      const anthropic = new Anthropic({
+        apiKey: process.env.ANTHROPIC_API_KEY!,
+      });
+      const anthropicTools = fabricTools.map(fabricToolToAnthropic);
+      result = await completeWithTools(
+        anthropic,
+        session.model,
+        session.systemPrompt,
+        history,
+        anthropicTools,
+        (name, args) => adapter.callFabricTool!(name, args),
+        maxTokens,
+      );
+    } else {
+      // No tools loaded — fall back to plain completion
+      result = await adapter.complete(
+        history.map((m) => ({
+          role: m.role as "user" | "assistant",
+          content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+        })) as CompletionMessage[],
+        { model: session.model, systemPrompt: session.systemPrompt, maxTokens },
+      );
+    }
+  } else {
+    // No gateway configured — plain completion
+    result = await adapter.complete(
+      history.map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+      })) as CompletionMessage[],
+      { model: session.model, systemPrompt: session.systemPrompt, maxTokens },
+    );
+  }
 
   // Store assistant response
   const assistantMsg = await adapter.addMessage({
     sessionId,
     role: "assistant",
     content: result.content,
-    model: result.model,
+    model: session.model,
     inputTokens: result.inputTokens,
     outputTokens: result.outputTokens,
   });
@@ -91,7 +234,7 @@ export async function sendMessage(
     content: result.content,
     inputTokens: result.inputTokens,
     outputTokens: result.outputTokens,
-    model: result.model,
+    model: session.model,
   };
 }
 

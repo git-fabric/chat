@@ -65,6 +65,22 @@ export interface SessionIndexEntry {
     updatedAt: string;
     messageCount: number;
 }
+export interface FabricToolSchema {
+    type: string;
+    properties?: Record<string, unknown>;
+    required?: string[];
+    [key: string]: unknown;
+}
+export interface FabricTool {
+    name: string;
+    description: string;
+    inputSchema: FabricToolSchema;
+}
+export interface FabricToolResult {
+    toolName: string;
+    result: unknown;
+    error?: string;
+}
 export interface ChatAdapter {
     createSession(opts: {
         systemPrompt?: string;
@@ -98,5 +114,7 @@ export interface ChatAdapter {
     embed(text: string): Promise<number[]>;
     getStats(): Promise<ChatStats>;
     health(): Promise<ChatHealth>;
+    listFabricTools?(): Promise<FabricTool[]>;
+    callFabricTool?(name: string, args: Record<string, unknown>): Promise<unknown>;
 }
 //# sourceMappingURL=types.d.ts.map

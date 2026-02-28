@@ -12,6 +12,8 @@
  *
  * Optional:
  *   GITHUB_STATE_REPO   — defaults to "ry-ops/git-steer-state"
+ *   FABRIC_GATEWAY_URL  — URL of the fabric-gateway MCP server (e.g. http://fabric-gateway.cortex-system.svc.cluster.local:3000)
+ *                         When set, chat_message_send will use Claude tool_use to query fabric apps
  */
 import type { ChatAdapter } from "../types.js";
 export declare function createAdapterFromEnv(): ChatAdapter;

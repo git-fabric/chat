@@ -12,6 +12,8 @@
  *
  * Optional:
  *   GITHUB_STATE_REPO   — defaults to "ry-ops/git-steer-state"
+ *   FABRIC_GATEWAY_URL  — URL of the fabric-gateway MCP server (e.g. http://fabric-gateway.cortex-system.svc.cluster.local:3000)
+ *                         When set, chat_message_send will use Claude tool_use to query fabric apps
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -27,6 +29,7 @@ import type {
   ChatStats,
   ChatHealth,
   SessionIndexEntry,
+  FabricTool,
 } from "../types.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -379,6 +382,77 @@ async function voyageEmbed(anthropicKey: string, text: string): Promise<number[]
   return data.data[0].embedding;
 }
 
+// ── Fabric gateway MCP client ─────────────────────────────────────────────────
+
+interface McpToolsListResult {
+  result?: { tools?: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }> };
+  tools?: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>;
+}
+
+async function fabricMcpRequest(
+  gatewayUrl: string,
+  method: string,
+  params: Record<string, unknown> = {},
+): Promise<unknown> {
+  const endpoint = gatewayUrl.replace(/\/$/, "") + "/mcp";
+  const body = {
+    jsonrpc: "2.0",
+    id: randomUUID(),
+    method,
+    params,
+  };
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Fabric gateway ${method} failed (${res.status}): ${text}`);
+  }
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes("text/event-stream")) {
+    // StreamableHTTP SSE response — parse first data: line
+    const text = await res.text();
+    const dataLine = text.split("\n").find((l) => l.startsWith("data:"));
+    if (!dataLine) throw new Error(`No data in SSE response for ${method}`);
+    return JSON.parse(dataLine.slice(5).trim());
+  }
+  return res.json();
+}
+
+async function gatewayListTools(gatewayUrl: string): Promise<FabricTool[]> {
+  const raw = (await fabricMcpRequest(gatewayUrl, "tools/list")) as McpToolsListResult;
+  // Handle both direct result and JSON-RPC wrapper
+  const tools = raw?.result?.tools ?? (raw as { tools?: unknown[] })?.tools ?? [];
+  return (tools as Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>).map((t) => ({
+    name: t.name,
+    description: t.description ?? "",
+    inputSchema: (t.inputSchema ?? { type: "object", properties: {} }) as FabricTool["inputSchema"],
+  }));
+}
+
+async function gatewayCallTool(
+  gatewayUrl: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const raw = await fabricMcpRequest(gatewayUrl, "tools/call", { name, arguments: args }) as {
+    result?: { content?: Array<{ type: string; text?: string }> };
+    content?: Array<{ type: string; text?: string }>;
+  };
+  // Unwrap MCP content blocks → return as parsed JSON or raw text
+  const contentBlocks = raw?.result?.content ?? raw?.content ?? [];
+  if (!Array.isArray(contentBlocks) || contentBlocks.length === 0) return raw;
+  const textBlock = contentBlocks.find((b: { type: string; text?: string }) => b.type === "text");
+  if (!textBlock || !textBlock.text) return contentBlocks;
+  try {
+    return JSON.parse(textBlock.text);
+  } catch {
+    return textBlock.text;
+  }
+}
+
 // ── createAdapterFromEnv ─────────────────────────────────────────────────────
 
 export function createAdapterFromEnv(): ChatAdapter {
@@ -396,6 +470,8 @@ export function createAdapterFromEnv(): ChatAdapter {
 
   const stateRepo =
     process.env.GITHUB_STATE_REPO ?? STATE_REPO_DEFAULT;
+
+  const fabricGatewayUrl = process.env.FABRIC_GATEWAY_URL ?? null;
 
   const anthropic = new Anthropic({ apiKey: anthropicKey });
 
@@ -744,5 +820,17 @@ export function createAdapterFromEnv(): ChatAdapter {
         qdrant: { latencyMs: qdrantLatency },
       };
     },
+
+    // Fabric gateway — only available when FABRIC_GATEWAY_URL is set
+    ...(fabricGatewayUrl
+      ? {
+          async listFabricTools() {
+            return gatewayListTools(fabricGatewayUrl);
+          },
+          async callFabricTool(name: string, args: Record<string, unknown>) {
+            return gatewayCallTool(fabricGatewayUrl, name, args);
+          },
+        }
+      : {}),
   } satisfies ChatAdapter;
 }

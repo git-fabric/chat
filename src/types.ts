@@ -84,6 +84,27 @@ export interface SessionIndexEntry {
   messageCount: number;
 }
 
+// ── Fabric gateway types ──────────────────────────────────────────────────────
+
+export interface FabricToolSchema {
+  type: string;
+  properties?: Record<string, unknown>;
+  required?: string[];
+  [key: string]: unknown;
+}
+
+export interface FabricTool {
+  name: string;
+  description: string;
+  inputSchema: FabricToolSchema;
+}
+
+export interface FabricToolResult {
+  toolName: string;
+  result: unknown;
+  error?: string;
+}
+
 // ── Adapter interface ────────────────────────────────────────────────────────
 
 export interface ChatAdapter {
@@ -136,4 +157,8 @@ export interface ChatAdapter {
   // Stats / health
   getStats(): Promise<ChatStats>;
   health(): Promise<ChatHealth>;
+
+  // Fabric gateway (optional — present when FABRIC_GATEWAY_URL is configured)
+  listFabricTools?(): Promise<FabricTool[]>;
+  callFabricTool?(name: string, args: Record<string, unknown>): Promise<unknown>;
 }
