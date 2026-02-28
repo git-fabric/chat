@@ -56,17 +56,16 @@ const httpPort = process.env.MCP_HTTP_PORT ? Number(process.env.MCP_HTTP_PORT) :
 
 if (httpPort) {
   // In-cluster mode: stateless StreamableHTTP on MCP_HTTP_PORT
-  // SDK 1.9+ uses Hono internally and parses the body itself — pass undefined
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  const server = buildServer();
-  await server.connect(transport);
-
+  // SDK 1.26 stateless transport is single-use — create new transport+server per request
   const httpServer = createServer(async (req, res) => {
     if (req.url === "/healthz") {
       res.writeHead(200).end("ok");
       return;
     }
     if (req.url === "/mcp" || req.url === "/") {
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      const server = buildServer();
+      await server.connect(transport);
       await transport.handleRequest(req, res, undefined);
       return;
     }
