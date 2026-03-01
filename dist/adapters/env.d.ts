@@ -2,19 +2,20 @@
  * Environment adapter
  *
  * Creates a ChatAdapter from environment variables.
- * Used by the CLI, the gateway loader, and direct programmatic use.
+ * State backend: Qdrant only (sessions + messages stored as points).
+ * No GitHub dependency for chat state.
  *
  * Required env vars:
- *   ANTHROPIC_API_KEY   — Claude completions + voyage-3-lite embeddings
- *   QDRANT_URL          — Qdrant instance URL (cloud or in-cluster)
- *   QDRANT_API_KEY      — Qdrant API key (omit for in-cluster no-auth)
- *   GITHUB_TOKEN        — state repo read/write access
+ *   ANTHROPIC_API_KEY  — Claude completions + Voyage AI embeddings
+ *   QDRANT_URL         — Qdrant instance URL (cloud or in-cluster)
  *
  * Optional:
- *   GITHUB_STATE_REPO   — defaults to "ry-ops/git-steer-state"
- *   FABRIC_GATEWAY_URL  — URL of the fabric-gateway MCP server (e.g. http://fabric-gateway.cortex-system.svc.cluster.local:3000)
- *                         When set, chat_message_send will use Claude tool_use to query fabric apps
+ *   QDRANT_API_KEY      — Qdrant API key (omit for in-cluster no-auth)
+ *   FABRIC_GATEWAY_URL  — fabric-gateway MCP endpoint; enables agentic tool loop
  */
-import type { ChatAdapter } from "../types.js";
+import { selectRelevantTools } from "./gateway.js";
+import type { ChatAdapter, FabricTool } from "../types.js";
 export declare function createAdapterFromEnv(): ChatAdapter;
+export { selectRelevantTools };
+export type { FabricTool };
 //# sourceMappingURL=env.d.ts.map

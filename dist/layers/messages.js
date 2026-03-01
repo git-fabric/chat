@@ -10,6 +10,7 @@
  * Outputs: ChatMessage objects / send results
  */
 import Anthropic from "@anthropic-ai/sdk";
+import { selectRelevantTools } from "../adapters/gateway.js";
 // ── Anthropic tool conversion ─────────────────────────────────────────────────
 function fabricToolToAnthropic(tool) {
     return {
@@ -35,15 +36,12 @@ async function completeWithTools(anthropic, model, systemPrompt, history, tools,
         totalInput += response.usage.input_tokens;
         totalOutput += response.usage.output_tokens;
         if (response.stop_reason === "end_turn" || response.stop_reason === "max_tokens") {
-            // Extract final text content
             const textBlock = response.content.find((b) => b.type === "text");
             const content = textBlock && textBlock.type === "text" ? textBlock.text : "";
             return { content, inputTokens: totalInput, outputTokens: totalOutput };
         }
         if (response.stop_reason === "tool_use") {
-            // Append assistant message with tool use blocks
             messages.push({ role: "assistant", content: response.content });
-            // Execute all tool calls in parallel
             const toolUseBlocks = response.content.filter((b) => b.type === "tool_use");
             const toolResults = await Promise.all(toolUseBlocks.map(async (block) => {
                 try {
@@ -63,7 +61,6 @@ async function completeWithTools(anthropic, model, systemPrompt, history, tools,
                     };
                 }
             }));
-            // Append tool results and continue
             messages.push({ role: "user", content: toolResults });
             continue;
         }
@@ -76,25 +73,20 @@ async function completeWithTools(anthropic, model, systemPrompt, history, tools,
 }
 // ── sendMessage ───────────────────────────────────────────────────────────────
 export async function sendMessage(adapter, sessionId, content, maxTokens = 8192) {
-    // Load session with current history
     const session = await adapter.getSession(sessionId);
     if (session.state === "archived") {
         throw new Error(`Session ${sessionId} is archived. Resume it or create a new session.`);
     }
-    // Store the user message first
-    const userMsg = await adapter.addMessage({
-        sessionId,
-        role: "user",
-        content,
-    });
-    // Embed and store user message in Qdrant (best-effort)
+    // Store the user message
+    const userMsg = await adapter.addMessage({ sessionId, role: "user", content });
+    // Embed user message (best-effort)
     try {
         await adapter.embedAndStore(userMsg);
     }
     catch {
-        // Non-fatal: semantic search degrades gracefully
+        // Non-fatal
     }
-    // Build message history for Anthropic
+    // Build Anthropic message history
     const history = [
         ...session.messages
             .filter((m) => m.role === "user" || m.role === "assistant")
@@ -104,28 +96,25 @@ export async function sendMessage(adapter, sessionId, content, maxTokens = 8192)
         })),
         { role: "user", content },
     ];
-    // Determine if fabric tools are available
     const hasFabricGateway = typeof adapter.listFabricTools === "function" &&
         typeof adapter.callFabricTool === "function";
     let result;
     if (hasFabricGateway) {
-        // Fetch available tools from the gateway (best-effort — fall back to plain if fails)
         let fabricTools = [];
         try {
-            fabricTools = await adapter.listFabricTools();
+            const allTools = await adapter.listFabricTools();
+            // Change A: pre-filter tools to only those relevant to this message
+            const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+            fabricTools = await selectRelevantTools(allTools, content, anthropic);
         }
         catch {
-            // Gateway unreachable — proceed without tools
+            // Gateway unreachable or filter failed — proceed without tools
         }
         if (fabricTools.length > 0) {
-            const anthropic = new Anthropic({
-                apiKey: process.env.ANTHROPIC_API_KEY,
-            });
-            const anthropicTools = fabricTools.map(fabricToolToAnthropic);
-            result = await completeWithTools(anthropic, session.model, session.systemPrompt, history, anthropicTools, (name, args) => adapter.callFabricTool(name, args), maxTokens);
+            const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+            result = await completeWithTools(anthropic, session.model, session.systemPrompt, history, fabricTools.map(fabricToolToAnthropic), (name, args) => adapter.callFabricTool(name, args), maxTokens);
         }
         else {
-            // No tools loaded — fall back to plain completion
             result = await adapter.complete(history.map((m) => ({
                 role: m.role,
                 content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
@@ -133,7 +122,6 @@ export async function sendMessage(adapter, sessionId, content, maxTokens = 8192)
         }
     }
     else {
-        // No gateway configured — plain completion
         result = await adapter.complete(history.map((m) => ({
             role: m.role,
             content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
@@ -148,7 +136,7 @@ export async function sendMessage(adapter, sessionId, content, maxTokens = 8192)
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
     });
-    // Embed and store assistant message (best-effort)
+    // Embed assistant message (best-effort)
     try {
         await adapter.embedAndStore(assistantMsg);
     }

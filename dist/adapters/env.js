@@ -2,295 +2,49 @@
  * Environment adapter
  *
  * Creates a ChatAdapter from environment variables.
- * Used by the CLI, the gateway loader, and direct programmatic use.
+ * State backend: Qdrant only (sessions + messages stored as points).
+ * No GitHub dependency for chat state.
  *
  * Required env vars:
- *   ANTHROPIC_API_KEY   — Claude completions + voyage-3-lite embeddings
- *   QDRANT_URL          — Qdrant instance URL (cloud or in-cluster)
- *   QDRANT_API_KEY      — Qdrant API key (omit for in-cluster no-auth)
- *   GITHUB_TOKEN        — state repo read/write access
+ *   ANTHROPIC_API_KEY  — Claude completions + Voyage AI embeddings
+ *   QDRANT_URL         — Qdrant instance URL (cloud or in-cluster)
  *
  * Optional:
- *   GITHUB_STATE_REPO   — defaults to "ry-ops/git-steer-state"
- *   FABRIC_GATEWAY_URL  — URL of the fabric-gateway MCP server (e.g. http://fabric-gateway.cortex-system.svc.cluster.local:3000)
- *                         When set, chat_message_send will use Claude tool_use to query fabric apps
+ *   QDRANT_API_KEY      — Qdrant API key (omit for in-cluster no-auth)
+ *   FABRIC_GATEWAY_URL  — fabric-gateway MCP endpoint; enables agentic tool loop
  */
-import Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "crypto";
-// ── Constants ────────────────────────────────────────────────────────────────
-const QDRANT_COLLECTION = "chat_fabric__messages__v1";
-const EMBEDDING_MODEL = "voyage-3-lite";
-const EMBEDDING_DIMS = 512;
+import { createAnthropicClient, complete as anthropicComplete, embed as voyageEmbed, pingAnthropic } from "./anthropic.js";
+import { ensureCollection, upsertPoint, upsertPointNoVec, setPayload, deleteByFilter, deleteById, search as qdrantSearch, scroll, getPoint, } from "./qdrant.js";
+import { listTools as gatewayListTools, callTool as gatewayCallTool, selectRelevantTools } from "./gateway.js";
+// ── Constants ─────────────────────────────────────────────────────────────────
 const DEFAULT_MODEL = "claude-sonnet-4-6";
-const STATE_REPO_DEFAULT = "ry-ops/git-steer-state";
-async function ghGet(token, repo, path) {
-    const url = `https://api.github.com/repos/${repo}/contents/${path}`;
-    const res = await fetch(url, {
-        headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    });
-    if (res.status === 404)
-        return null;
-    if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`GitHub GET ${path} failed (${res.status}): ${body}`);
-    }
-    const data = (await res.json());
-    const content = Buffer.from(data.content, "base64").toString("utf-8");
-    return { content, sha: data.sha };
+// Qdrant payload _type discriminators
+const TYPE_SESSION = "session";
+const TYPE_MESSAGE = "message";
+// ── Session payload helpers ───────────────────────────────────────────────────
+function sessionToPayload(s) {
+    return { _type: TYPE_SESSION, ...s };
 }
-async function ghPut(token, repo, path, content, message, sha) {
-    const url = `https://api.github.com/repos/${repo}/contents/${path}`;
-    const body = {
-        message,
-        content: Buffer.from(content).toString("base64"),
-    };
-    if (sha)
-        body.sha = sha;
-    const res = await fetch(url, {
-        method: "PUT",
-        headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`GitHub PUT ${path} failed (${res.status}): ${text}`);
-    }
+function payloadToSession(p) {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { _type, ...rest } = p;
+    return rest;
 }
-async function ghDelete(token, repo, path, message, sha) {
-    const url = `https://api.github.com/repos/${repo}/contents/${path}`;
-    const res = await fetch(url, {
-        method: "DELETE",
-        headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ message, sha }),
-    });
-    if (!res.ok && res.status !== 404) {
-        const text = await res.text();
-        throw new Error(`GitHub DELETE ${path} failed (${res.status}): ${text}`);
-    }
+// ── Message payload helpers ───────────────────────────────────────────────────
+function messageToPayload(m) {
+    return { _type: TYPE_MESSAGE, ...m };
 }
-// ── State helpers ────────────────────────────────────────────────────────────
-function sessionPath(sessionId) {
-    return `chat/sessions/${sessionId}.json`;
+function payloadToMessage(p) {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { _type, ...rest } = p;
+    return rest;
 }
-function messagesPath(sessionId) {
-    return `chat/sessions/${sessionId}/messages.jsonl`;
-}
-const INDEX_PATH = "chat/index.json";
-async function readIndex(token, stateRepo) {
-    const file = await ghGet(token, stateRepo, INDEX_PATH);
-    if (!file)
-        return { entries: [] };
-    const entries = JSON.parse(file.content);
-    return { entries, sha: file.sha };
-}
-async function writeIndex(token, stateRepo, entries, sha) {
-    await ghPut(token, stateRepo, INDEX_PATH, JSON.stringify(entries, null, 2), "chore(chat): update session index", sha);
-}
-async function readSession(token, stateRepo, sessionId) {
-    const file = await ghGet(token, stateRepo, sessionPath(sessionId));
-    if (!file)
-        return null;
-    return { session: JSON.parse(file.content), sha: file.sha };
-}
-async function writeSession(token, stateRepo, session, sha) {
-    await ghPut(token, stateRepo, sessionPath(session.id), JSON.stringify(session, null, 2), `chore(chat): ${sha ? "update" : "create"} session ${session.id}`, sha);
-}
-async function readMessages(token, stateRepo, sessionId) {
-    const file = await ghGet(token, stateRepo, messagesPath(sessionId));
-    if (!file)
-        return null;
-    const messages = file.content
-        .split("\n")
-        .filter((line) => line.trim() !== "")
-        .map((line) => JSON.parse(line));
-    return { messages, sha: file.sha };
-}
-async function appendMessage(token, stateRepo, message) {
-    const existing = await readMessages(token, stateRepo, message.sessionId);
-    const newLine = JSON.stringify(message) + "\n";
-    const updatedContent = existing
-        ? existing.messages.map((m) => JSON.stringify(m)).join("\n") + "\n" + newLine
-        : newLine;
-    await ghPut(token, stateRepo, messagesPath(message.sessionId), updatedContent, `chore(chat): append message ${message.id} to session ${message.sessionId}`, existing?.sha);
-}
-async function qdrantEnsureCollection(qdrantUrl, qdrantKey) {
-    const url = `${qdrantUrl}/collections/${QDRANT_COLLECTION}`;
-    const checkRes = await fetch(url, {
-        headers: { "api-key": qdrantKey },
-    });
-    if (checkRes.ok)
-        return; // already exists
-    const createRes = await fetch(url, {
-        method: "PUT",
-        headers: {
-            "api-key": qdrantKey,
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-            vectors: {
-                size: EMBEDDING_DIMS,
-                distance: "Cosine",
-            },
-        }),
-    });
-    if (!createRes.ok) {
-        const text = await createRes.text();
-        throw new Error(`Qdrant create collection failed (${createRes.status}): ${text}`);
-    }
-}
-async function qdrantUpsert(qdrantUrl, qdrantKey, point) {
-    const res = await fetch(`${qdrantUrl}/collections/${QDRANT_COLLECTION}/points`, {
-        method: "PUT",
-        headers: {
-            "api-key": qdrantKey,
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ points: [point] }),
-    });
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Qdrant upsert failed (${res.status}): ${text}`);
-    }
-}
-async function qdrantSearch(qdrantUrl, qdrantKey, vector, filter, limit) {
-    const body = {
-        vector,
-        limit,
-        with_payload: true,
-    };
-    if (filter)
-        body.filter = filter;
-    const res = await fetch(`${qdrantUrl}/collections/${QDRANT_COLLECTION}/points/search`, {
-        method: "POST",
-        headers: {
-            "api-key": qdrantKey,
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Qdrant search failed (${res.status}): ${text}`);
-    }
-    const data = (await res.json());
-    return data.result;
-}
-async function qdrantDeleteBySessionId(qdrantUrl, qdrantKey, sessionId) {
-    const res = await fetch(`${qdrantUrl}/collections/${QDRANT_COLLECTION}/points/delete`, {
-        method: "POST",
-        headers: {
-            "api-key": qdrantKey,
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-            filter: {
-                must: [
-                    {
-                        key: "sessionId",
-                        match: { value: sessionId },
-                    },
-                ],
-            },
-        }),
-    });
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Qdrant delete by sessionId failed (${res.status}): ${text}`);
-    }
-}
-// ── Token counting helpers ────────────────────────────────────────────────────
+// ── Token helpers ─────────────────────────────────────────────────────────────
 function isoToday() {
-    return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    return new Date().toISOString().slice(0, 10);
 }
-// ── Voyage AI embeddings (via Anthropic API key) ─────────────────────────────
-async function voyageEmbed(anthropicKey, text) {
-    const res = await fetch("https://api.voyageai.com/v1/embeddings", {
-        method: "POST",
-        headers: {
-            "Authorization": `Bearer ${anthropicKey}`,
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-            input: [text],
-            model: EMBEDDING_MODEL,
-        }),
-    });
-    if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`Voyage embed failed (${res.status}): ${body}`);
-    }
-    const data = await res.json();
-    return data.data[0].embedding;
-}
-async function fabricMcpRequest(gatewayUrl, method, params = {}) {
-    const endpoint = gatewayUrl.replace(/\/$/, "") + "/mcp";
-    const body = {
-        jsonrpc: "2.0",
-        id: randomUUID(),
-        method,
-        params,
-    };
-    const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
-        body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Fabric gateway ${method} failed (${res.status}): ${text}`);
-    }
-    const contentType = res.headers.get("content-type") ?? "";
-    if (contentType.includes("text/event-stream")) {
-        // StreamableHTTP SSE response — parse first data: line
-        const text = await res.text();
-        const dataLine = text.split("\n").find((l) => l.startsWith("data:"));
-        if (!dataLine)
-            throw new Error(`No data in SSE response for ${method}`);
-        return JSON.parse(dataLine.slice(5).trim());
-    }
-    return res.json();
-}
-async function gatewayListTools(gatewayUrl) {
-    const raw = (await fabricMcpRequest(gatewayUrl, "tools/list"));
-    // Handle both direct result and JSON-RPC wrapper
-    const tools = raw?.result?.tools ?? raw?.tools ?? [];
-    return tools.map((t) => ({
-        name: t.name,
-        description: t.description ?? "",
-        inputSchema: (t.inputSchema ?? { type: "object", properties: {} }),
-    }));
-}
-async function gatewayCallTool(gatewayUrl, name, args) {
-    const raw = await fabricMcpRequest(gatewayUrl, "tools/call", { name, arguments: args });
-    // Unwrap MCP content blocks → return as parsed JSON or raw text
-    const contentBlocks = raw?.result?.content ?? raw?.content ?? [];
-    if (!Array.isArray(contentBlocks) || contentBlocks.length === 0)
-        return raw;
-    const textBlock = contentBlocks.find((b) => b.type === "text");
-    if (!textBlock || !textBlock.text)
-        return contentBlocks;
-    try {
-        return JSON.parse(textBlock.text);
-    }
-    catch {
-        return textBlock.text;
-    }
-}
-// ── createAdapterFromEnv ─────────────────────────────────────────────────────
+// ── createAdapterFromEnv ──────────────────────────────────────────────────────
 export function createAdapterFromEnv() {
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (!anthropicKey)
@@ -298,25 +52,21 @@ export function createAdapterFromEnv() {
     const qdrantUrl = process.env.QDRANT_URL;
     if (!qdrantUrl)
         throw new Error("QDRANT_URL required");
-    // QDRANT_API_KEY is optional for in-cluster no-auth deployments
     const qdrantKey = process.env.QDRANT_API_KEY ?? "";
-    const githubToken = process.env.GITHUB_TOKEN;
-    if (!githubToken)
-        throw new Error("GITHUB_TOKEN required");
-    const stateRepo = process.env.GITHUB_STATE_REPO ?? STATE_REPO_DEFAULT;
     const fabricGatewayUrl = process.env.FABRIC_GATEWAY_URL ?? null;
-    const anthropic = new Anthropic({ apiKey: anthropicKey });
-    // Lazy collection creation — only on first embedAndStore/search
+    const anthropic = createAnthropicClient(anthropicKey);
+    // Lazy collection bootstrap — runs once on first use
     let collectionReady = false;
-    async function ensureCollection() {
+    async function boot() {
         if (collectionReady)
             return;
-        await qdrantEnsureCollection(qdrantUrl, qdrantKey);
+        await ensureCollection(qdrantUrl, qdrantKey);
         collectionReady = true;
     }
     return {
-        // ── Sessions ────────────────────────────────────────────────────────────
+        // ── Sessions ──────────────────────────────────────────────────────────────
         async createSession(opts) {
+            await boot();
             const now = new Date().toISOString();
             const session = {
                 id: randomUUID(),
@@ -331,261 +81,164 @@ export function createAdapterFromEnv() {
                 totalInputTokens: 0,
                 totalOutputTokens: 0,
             };
-            // Write session file
-            await writeSession(githubToken, stateRepo, session);
-            // Update index
-            const { entries, sha: indexSha } = await readIndex(githubToken, stateRepo);
-            entries.unshift({
-                id: session.id,
-                title: session.title,
-                project: session.project,
-                state: session.state,
-                createdAt: session.createdAt,
-                updatedAt: session.updatedAt,
-                messageCount: session.messageCount,
-            });
-            await writeIndex(githubToken, stateRepo, entries, indexSha);
+            await upsertPointNoVec(qdrantUrl, qdrantKey, session.id, sessionToPayload(session));
             return session;
         },
         async listSessions(opts) {
-            const { entries } = await readIndex(githubToken, stateRepo);
-            let filtered = entries;
+            await boot();
+            const must = [
+                { key: "_type", match: { value: TYPE_SESSION } },
+            ];
             if (opts.state !== "all") {
-                filtered = entries.filter((e) => e.state === opts.state);
+                must.push({ key: "state", match: { value: opts.state } });
             }
             if (opts.project) {
-                filtered = filtered.filter((e) => e.project === opts.project);
+                must.push({ key: "project", match: { value: opts.project } });
             }
-            filtered = filtered.slice(0, opts.limit);
-            // Fetch full session objects (for fields like model, systemPrompt, token counts)
-            const sessions = await Promise.all(filtered.map(async (entry) => {
-                const result = await readSession(githubToken, stateRepo, entry.id);
-                if (!result) {
-                    // Index out of sync — return stub from index
-                    return {
-                        id: entry.id,
-                        title: entry.title,
-                        project: entry.project,
-                        model: DEFAULT_MODEL,
-                        state: entry.state,
-                        createdAt: entry.createdAt,
-                        updatedAt: entry.updatedAt,
-                        messageCount: entry.messageCount,
-                        totalInputTokens: 0,
-                        totalOutputTokens: 0,
-                    };
-                }
-                return result.session;
-            }));
-            return sessions;
+            const result = await scroll(qdrantUrl, qdrantKey, { must }, opts.limit);
+            return result.points
+                .map((p) => payloadToSession(p.payload))
+                .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
         },
         async getSession(sessionId) {
-            const result = await readSession(githubToken, stateRepo, sessionId);
-            if (!result)
+            await boot();
+            const payload = await getPoint(qdrantUrl, qdrantKey, sessionId);
+            if (!payload)
                 throw new Error(`Session not found: ${sessionId}`);
-            const msgs = await readMessages(githubToken, stateRepo, sessionId);
-            return { ...result.session, messages: msgs?.messages ?? [] };
+            const session = payloadToSession(payload);
+            // Fetch messages ordered by timestamp
+            const msgResult = await scroll(qdrantUrl, qdrantKey, { must: [
+                    { key: "_type", match: { value: TYPE_MESSAGE } },
+                    { key: "sessionId", match: { value: sessionId } },
+                ] }, 1000);
+            const messages = msgResult.points
+                .map((p) => payloadToMessage(p.payload))
+                .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+            return { ...session, messages };
         },
         async updateSession(sessionId, patch) {
-            const result = await readSession(githubToken, stateRepo, sessionId);
-            if (!result)
+            await boot();
+            const payload = await getPoint(qdrantUrl, qdrantKey, sessionId);
+            if (!payload)
                 throw new Error(`Session not found: ${sessionId}`);
+            const current = payloadToSession(payload);
             const updated = {
-                ...result.session,
+                ...current,
                 ...patch,
                 updatedAt: new Date().toISOString(),
             };
-            await writeSession(githubToken, stateRepo, updated, result.sha);
-            // Update index
-            const { entries, sha: indexSha } = await readIndex(githubToken, stateRepo);
-            const idx = entries.findIndex((e) => e.id === sessionId);
-            if (idx !== -1) {
-                entries[idx] = {
-                    ...entries[idx],
-                    title: updated.title,
-                    state: updated.state,
-                    updatedAt: updated.updatedAt,
-                };
-                await writeIndex(githubToken, stateRepo, entries, indexSha);
-            }
+            await setPayload(qdrantUrl, qdrantKey, sessionId, sessionToPayload(updated));
             return updated;
         },
         async deleteSession(sessionId) {
-            const result = await readSession(githubToken, stateRepo, sessionId);
-            if (!result)
-                throw new Error(`Session not found: ${sessionId}`);
-            // Delete session file
-            await ghDelete(githubToken, stateRepo, sessionPath(sessionId), `chore(chat): delete session ${sessionId}`, result.sha);
-            // Delete messages file if it exists
-            const msgs = await readMessages(githubToken, stateRepo, sessionId);
-            if (msgs) {
-                await ghDelete(githubToken, stateRepo, messagesPath(sessionId), `chore(chat): delete messages for session ${sessionId}`, msgs.sha);
-            }
-            // Remove from Qdrant
-            try {
-                await qdrantDeleteBySessionId(qdrantUrl, qdrantKey, sessionId);
-            }
-            catch {
-                // Non-fatal: Qdrant vectors are best-effort during deletion
-            }
-            // Remove from index
-            const { entries, sha: indexSha } = await readIndex(githubToken, stateRepo);
-            const filtered = entries.filter((e) => e.id !== sessionId);
-            await writeIndex(githubToken, stateRepo, filtered, indexSha);
+            await boot();
+            // Delete session point
+            await deleteById(qdrantUrl, qdrantKey, sessionId);
+            // Delete all message points for this session
+            await deleteByFilter(qdrantUrl, qdrantKey, {
+                must: [
+                    { key: "_type", match: { value: TYPE_MESSAGE } },
+                    { key: "sessionId", match: { value: sessionId } },
+                ],
+            });
         },
-        // ── Messages ────────────────────────────────────────────────────────────
+        // ── Messages ──────────────────────────────────────────────────────────────
         async getMessages(sessionId, limit, offset) {
-            const msgs = await readMessages(githubToken, stateRepo, sessionId);
-            if (!msgs)
-                return [];
-            return msgs.messages.slice(offset, offset + limit);
+            await boot();
+            const result = await scroll(qdrantUrl, qdrantKey, { must: [
+                    { key: "_type", match: { value: TYPE_MESSAGE } },
+                    { key: "sessionId", match: { value: sessionId } },
+                ] }, limit + offset);
+            return result.points
+                .map((p) => payloadToMessage(p.payload))
+                .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+                .slice(offset, offset + limit);
         },
         async addMessage(msg) {
+            await boot();
             const message = {
                 ...msg,
                 id: randomUUID(),
                 timestamp: new Date().toISOString(),
             };
-            await appendMessage(githubToken, stateRepo, message);
-            // Update session stats
-            const sessionResult = await readSession(githubToken, stateRepo, msg.sessionId);
-            if (sessionResult) {
-                const updated = {
-                    ...sessionResult.session,
-                    messageCount: sessionResult.session.messageCount + 1,
-                    totalInputTokens: sessionResult.session.totalInputTokens + (msg.inputTokens ?? 0),
-                    totalOutputTokens: sessionResult.session.totalOutputTokens + (msg.outputTokens ?? 0),
+            // Store message with zero vector (embedAndStore adds the real vector separately)
+            await upsertPointNoVec(qdrantUrl, qdrantKey, message.id, messageToPayload(message));
+            // Update session stats inline — single setPayload call
+            const sessionPayload = await getPoint(qdrantUrl, qdrantKey, msg.sessionId);
+            if (sessionPayload) {
+                const s = payloadToSession(sessionPayload);
+                const updatedSession = {
+                    ...s,
+                    messageCount: s.messageCount + 1,
+                    totalInputTokens: s.totalInputTokens + (msg.inputTokens ?? 0),
+                    totalOutputTokens: s.totalOutputTokens + (msg.outputTokens ?? 0),
                     updatedAt: message.timestamp,
                 };
-                await writeSession(githubToken, stateRepo, updated, sessionResult.sha);
-                // Update index entry
-                const { entries, sha: indexSha } = await readIndex(githubToken, stateRepo);
-                const idx = entries.findIndex((e) => e.id === msg.sessionId);
-                if (idx !== -1) {
-                    entries[idx] = {
-                        ...entries[idx],
-                        messageCount: updated.messageCount,
-                        updatedAt: updated.updatedAt,
-                    };
-                    await writeIndex(githubToken, stateRepo, entries, indexSha);
-                }
+                await setPayload(qdrantUrl, qdrantKey, msg.sessionId, sessionToPayload(updatedSession));
             }
             return message;
         },
-        // ── LLM ──────────────────────────────────────────────────────────────────
+        // ── LLM ───────────────────────────────────────────────────────────────────
         async complete(messages, opts) {
-            // Filter out system messages from the messages array;
-            // system prompt is passed separately to Anthropic
-            const userAssistantMessages = messages.filter((m) => m.role === "user" || m.role === "assistant");
-            const response = await anthropic.messages.create({
-                model: opts.model,
-                max_tokens: opts.maxTokens,
-                system: opts.systemPrompt,
-                messages: userAssistantMessages,
-            });
-            const textBlock = response.content.find((b) => b.type === "text");
-            const content = textBlock && textBlock.type === "text" ? textBlock.text : "";
-            return {
-                content,
-                inputTokens: response.usage.input_tokens,
-                outputTokens: response.usage.output_tokens,
-                model: opts.model,
-            };
+            return anthropicComplete(anthropic, opts.model, opts.systemPrompt, messages, opts.maxTokens);
         },
         // ── Semantic search ───────────────────────────────────────────────────────
         async embed(text) {
             return voyageEmbed(anthropicKey, text);
         },
         async embedAndStore(message) {
-            await ensureCollection();
+            await boot();
             const vector = await voyageEmbed(anthropicKey, message.content);
-            await qdrantUpsert(qdrantUrl, qdrantKey, {
+            // Upsert with real vector — overwrites the zero-vector placeholder
+            await upsertPoint(qdrantUrl, qdrantKey, {
                 id: message.id,
                 vector,
-                payload: {
-                    sessionId: message.sessionId,
-                    role: message.role,
-                    content: message.content,
-                    model: message.model ?? null,
-                    timestamp: message.timestamp,
-                    project: null, // enriched by caller if needed
-                    metadata: message.metadata ?? null,
-                },
+                payload: messageToPayload(message),
             });
         },
         async searchMessages(query, opts) {
-            await ensureCollection();
-            // Build Qdrant filter
-            const mustClauses = [];
-            if (opts.sessionId) {
-                mustClauses.push({ key: "sessionId", match: { value: opts.sessionId } });
-            }
-            if (opts.project) {
-                mustClauses.push({ key: "project", match: { value: opts.project } });
-            }
-            const filter = mustClauses.length > 0 ? { must: mustClauses } : undefined;
-            const results = await qdrantSearch(qdrantUrl, qdrantKey, query, filter, opts.limit);
+            await boot();
+            const must = [
+                { key: "_type", match: { value: TYPE_MESSAGE } },
+            ];
+            if (opts.sessionId)
+                must.push({ key: "sessionId", match: { value: opts.sessionId } });
+            if (opts.project)
+                must.push({ key: "project", match: { value: opts.project } });
+            const results = await qdrantSearch(qdrantUrl, qdrantKey, query, must.length > 1 ? { must } : { must: [must[0]] }, opts.limit);
             return results.map((r) => ({
-                id: r.id,
-                sessionId: r.payload.sessionId,
-                role: r.payload.role,
-                content: r.payload.content,
-                model: r.payload.model ?? undefined,
-                timestamp: r.payload.timestamp,
-                metadata: r.payload.metadata,
+                ...payloadToMessage(r.payload),
                 score: r.score,
             }));
         },
         // ── Stats / health ────────────────────────────────────────────────────────
         async getStats() {
-            const { entries } = await readIndex(githubToken, stateRepo);
-            const totalSessions = entries.length;
-            const totalMessages = entries.reduce((sum, e) => sum + e.messageCount, 0);
-            // Count tokens today by inspecting sessions updated today
+            await boot();
             const today = isoToday();
-            const updatedToday = entries.filter((e) => e.updatedAt.startsWith(today));
-            let tokensToday = 0;
-            await Promise.all(updatedToday.map(async (entry) => {
-                const result = await readSession(githubToken, stateRepo, entry.id);
-                if (result) {
-                    tokensToday +=
-                        result.session.totalInputTokens +
-                            result.session.totalOutputTokens;
-                }
-            }));
+            // Count sessions
+            const sessionResult = await scroll(qdrantUrl, qdrantKey, { must: [{ key: "_type", match: { value: TYPE_SESSION } }] }, 10000);
+            const sessions = sessionResult.points.map((p) => payloadToSession(p.payload));
+            const totalSessions = sessions.length;
+            const totalMessages = sessions.reduce((s, sess) => s + sess.messageCount, 0);
+            const tokensToday = sessions
+                .filter((s) => s.updatedAt.startsWith(today))
+                .reduce((sum, s) => sum + s.totalInputTokens + s.totalOutputTokens, 0);
             return { totalSessions, totalMessages, tokensToday };
         },
         async health() {
-            // Anthropic ping
-            const anthropicStart = Date.now();
-            try {
-                await anthropic.messages.create({
-                    model: "claude-haiku-4-5-20251001",
-                    max_tokens: 1,
-                    messages: [{ role: "user", content: "ping" }],
-                });
-            }
-            catch {
-                // Ignore — we measure latency regardless
-            }
-            const anthropicLatency = Date.now() - anthropicStart;
-            // Qdrant ping
+            const anthropicLatency = await pingAnthropic(anthropic);
             const qdrantStart = Date.now();
             try {
-                await fetch(`${qdrantUrl}/healthz`, {
-                    headers: { "api-key": qdrantKey },
-                });
+                await fetch(`${qdrantUrl}/healthz`, { headers: { "api-key": qdrantKey } });
             }
-            catch {
-                // Ignore — we measure latency regardless
-            }
+            catch { /* measure regardless */ }
             const qdrantLatency = Date.now() - qdrantStart;
             return {
                 anthropic: { latencyMs: anthropicLatency },
                 qdrant: { latencyMs: qdrantLatency },
             };
         },
-        // Fabric gateway — only available when FABRIC_GATEWAY_URL is set
+        // ── Fabric gateway (optional) ─────────────────────────────────────────────
         ...(fabricGatewayUrl
             ? {
                 async listFabricTools() {
@@ -598,4 +251,6 @@ export function createAdapterFromEnv() {
             : {}),
     };
 }
+// Re-export sub-adapters for direct use in tests / pipelines
+export { selectRelevantTools };
 //# sourceMappingURL=env.js.map
