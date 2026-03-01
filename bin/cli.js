@@ -63,10 +63,14 @@ if (httpPort) {
       return;
     }
     if (req.url === "/mcp" || req.url === "/") {
+      // Read the full request body before handing to transport
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = Buffer.concat(chunks);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       const server = buildServer();
       await server.connect(transport);
-      await transport.handleRequest(req, res, undefined);
+      await transport.handleRequest(req, res, body);
       return;
     }
     res.writeHead(404).end("not found");
