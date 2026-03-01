@@ -70,12 +70,9 @@ if (httpPort) {
       const rawBody = Buffer.concat(chunks).toString('utf8');
       let parsedBody;
       try { parsedBody = JSON.parse(rawBody); } catch { parsedBody = undefined; }
-      // SDK 1.27 enforces Accept: text/event-stream. Inject it so MCP clients
-      // that send only Accept: application/json aren't rejected at the gate.
-      const accept = req.headers['accept'] ?? '';
-      if (!accept.includes('text/event-stream')) {
-        req.headers['accept'] = accept ? `${accept}, text/event-stream` : 'application/json, text/event-stream';
-      }
+      // SDK 1.27 POST handler requires both application/json and text/event-stream in Accept.
+      // Unconditionally normalize so any client (Claude Code, curl, etc.) passes the gate.
+      req.headers['accept'] = 'application/json, text/event-stream';
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       const server = buildServer();
       await server.connect(transport);
