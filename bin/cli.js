@@ -70,9 +70,20 @@ if (httpPort) {
       const rawBody = Buffer.concat(chunks).toString('utf8');
       let parsedBody;
       try { parsedBody = JSON.parse(rawBody); } catch { parsedBody = undefined; }
-      // SDK 1.27 POST handler requires both application/json and text/event-stream in Accept.
-      // Unconditionally normalize so any client (Claude Code, curl, etc.) passes the gate.
-      req.headers['accept'] = 'application/json, text/event-stream';
+      // SDK 1.27 requires Accept: application/json, text/event-stream on all MCP requests.
+      // Hono (used inside StreamableHTTPServerTransport) builds Web Standard headers from
+      // req.rawHeaders — the immutable socket-parsed array — not from req.headers.
+      // We must patch both so the validation in webStandardStreamableHttp.js sees the value.
+      const normalizedAccept = 'application/json, text/event-stream';
+      req.headers['accept'] = normalizedAccept;
+      const acceptIdx = req.rawHeaders.findIndex(
+        (h, i) => i % 2 === 0 && h.toLowerCase() === 'accept'
+      );
+      if (acceptIdx !== -1) {
+        req.rawHeaders[acceptIdx + 1] = normalizedAccept;
+      } else {
+        req.rawHeaders.push('accept', normalizedAccept);
+      }
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       const server = buildServer();
       await server.connect(transport);
