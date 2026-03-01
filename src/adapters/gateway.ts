@@ -19,7 +19,9 @@ import { randomUUID } from "crypto";
 import type { FabricTool } from "../types.js";
 
 // Maximum tools to pass into the agentic loop — keeps context overhead low
-const MAX_TOOLS = 40;
+// 167 tools × ~270 chars each ≈ 11k tokens total schemas; 200k context limit
+// Allow up to 80 tools (covers any 2-3 category cross-app query comfortably)
+const MAX_TOOLS = 80;
 
 // ── Raw MCP request ───────────────────────────────────────────────────────────
 
@@ -100,6 +102,7 @@ export async function selectRelevantTools(
 ): Promise<FabricTool[]> {
   if (allTools.length <= MAX_TOOLS) return allTools;
 
+
   // Build category map: prefix → tools[]
   const categoryMap = new Map<string, FabricTool[]>();
   for (const tool of allTools) {
@@ -147,9 +150,12 @@ export async function selectRelevantTools(
     }
 
     // If filter returned nothing useful, fall back
-    return filtered.length > 0 ? filtered : allTools;
+    if (filtered.length === 0) return allTools.slice(0, MAX_TOOLS);
+
+    // Enforce hard cap — prioritize relevant tools but never exceed MAX_TOOLS
+    return filtered.slice(0, MAX_TOOLS);
   } catch {
-    // Classification failed — pass all tools through
-    return allTools;
+    // Classification failed — pass all tools through, but still cap
+    return allTools.slice(0, MAX_TOOLS);
   }
 }
