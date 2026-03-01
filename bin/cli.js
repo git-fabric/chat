@@ -63,14 +63,17 @@ if (httpPort) {
       return;
     }
     if (req.url === "/mcp" || req.url === "/") {
-      // Read the full request body before handing to transport
+      // Read and parse the request body before handing to transport.
+      // SDK 1.27+ expects parsedBody to be the already-parsed JSON object.
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
-      const body = Buffer.concat(chunks);
+      const rawBody = Buffer.concat(chunks).toString('utf8');
+      let parsedBody;
+      try { parsedBody = JSON.parse(rawBody); } catch { parsedBody = undefined; }
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       const server = buildServer();
       await server.connect(transport);
-      await transport.handleRequest(req, res, body);
+      await transport.handleRequest(req, res, parsedBody);
       return;
     }
     res.writeHead(404).end("not found");
