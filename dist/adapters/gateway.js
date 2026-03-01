@@ -15,7 +15,9 @@
  */
 import { randomUUID } from "crypto";
 // Maximum tools to pass into the agentic loop — keeps context overhead low
-const MAX_TOOLS = 40;
+// 167 tools × ~270 chars each ≈ 11k tokens total schemas; 200k context limit
+// Allow up to 80 tools (covers any 2-3 category cross-app query comfortably)
+const MAX_TOOLS = 80;
 // ── Raw MCP request ───────────────────────────────────────────────────────────
 async function mcpRequest(gatewayUrl, method, params = {}) {
     const endpoint = gatewayUrl.replace(/\/$/, "") + "/mcp";
@@ -117,11 +119,14 @@ export async function selectRelevantTools(allTools, userMessage, anthropic) {
                 filtered.push(...tools);
         }
         // If filter returned nothing useful, fall back
-        return filtered.length > 0 ? filtered : allTools;
+        if (filtered.length === 0)
+            return allTools.slice(0, MAX_TOOLS);
+        // Enforce hard cap — prioritize relevant tools but never exceed MAX_TOOLS
+        return filtered.slice(0, MAX_TOOLS);
     }
     catch {
-        // Classification failed — pass all tools through
-        return allTools;
+        // Classification failed — pass all tools through, but still cap
+        return allTools.slice(0, MAX_TOOLS);
     }
 }
 //# sourceMappingURL=gateway.js.map
