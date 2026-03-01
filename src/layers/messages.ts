@@ -80,14 +80,21 @@ async function completeWithTools(
         (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
       );
 
+      // Max chars per tool result (~50k chars ≈ 12k tokens) to stay inside context limit
+      const MAX_RESULT_CHARS = 50_000;
+
       const toolResults = await Promise.all(
         toolUseBlocks.map(async (block) => {
           try {
             const result = await callTool(block.name, block.input as Record<string, unknown>);
+            let content = JSON.stringify(result);
+            if (content.length > MAX_RESULT_CHARS) {
+              content = content.slice(0, MAX_RESULT_CHARS) + `\n...[truncated — ${content.length - MAX_RESULT_CHARS} chars omitted]`;
+            }
             return {
               type: "tool_result" as const,
               tool_use_id: block.id,
-              content: JSON.stringify(result),
+              content,
             };
           } catch (err) {
             return {

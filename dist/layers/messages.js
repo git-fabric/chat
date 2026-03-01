@@ -43,13 +43,19 @@ async function completeWithTools(anthropic, model, systemPrompt, history, tools,
         if (response.stop_reason === "tool_use") {
             messages.push({ role: "assistant", content: response.content });
             const toolUseBlocks = response.content.filter((b) => b.type === "tool_use");
+            // Max chars per tool result (~50k chars ≈ 12k tokens) to stay inside context limit
+            const MAX_RESULT_CHARS = 50_000;
             const toolResults = await Promise.all(toolUseBlocks.map(async (block) => {
                 try {
                     const result = await callTool(block.name, block.input);
+                    let content = JSON.stringify(result);
+                    if (content.length > MAX_RESULT_CHARS) {
+                        content = content.slice(0, MAX_RESULT_CHARS) + `\n...[truncated — ${content.length - MAX_RESULT_CHARS} chars omitted]`;
+                    }
                     return {
                         type: "tool_result",
                         tool_use_id: block.id,
-                        content: JSON.stringify(result),
+                        content,
                     };
                 }
                 catch (err) {
