@@ -547,6 +547,53 @@
 
         /* Collapsible sections */
         .conversations-section { margin-bottom: 4px; }
+
+        /* Tables */
+        .message-bubble table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 8px 0;
+            font-size: 13px;
+        }
+
+        .message-bubble th,
+        .message-bubble td {
+            padding: 6px 10px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .message-bubble th {
+            font-weight: 600;
+            color: var(--text-secondary);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            border-bottom: 2px solid var(--border-medium);
+        }
+
+        .message-bubble tr:last-child td { border-bottom: none; }
+
+        /* Lists */
+        .message-bubble ul {
+            margin: 6px 0;
+            padding-left: 20px;
+        }
+
+        .message-bubble li { margin: 3px 0; }
+
+        /* Headings inside bubbles */
+        .message-bubble h1,
+        .message-bubble h2,
+        .message-bubble h3 {
+            margin: 10px 0 4px;
+            font-weight: 600;
+            line-height: 1.3;
+        }
+
+        .message-bubble h1 { font-size: 17px; }
+        .message-bubble h2 { font-size: 15px; }
+        .message-bubble h3 { font-size: 13px; color: var(--text-secondary); }
     </style>
 </head>
 <body>
@@ -1016,23 +1063,95 @@
 
         // ── Markdown renderer ─────────────────────────────────────────────────────
         function formatMarkdown(text) {
-            let out = text;
-            // Fenced code blocks
-            out = out.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, lang, code) =>
-                `<pre><code>${escapeHtml(code.trim())}</code></pre>`);
-            // Inline code
-            out = out.replace(/`([^`\n]+)`/g, '<code>$1</code>');
-            // Bold
-            out = out.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
-            // Headings (h3, h2, h1)
-            out = out.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-            out = out.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-            out = out.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-            // Unordered list items
-            out = out.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
-            // Line breaks (outside block elements)
-            out = out.replace(/\n(?!<\/?(pre|li|h[123]|ul|ol))/g, '<br>');
-            return out;
+            // Process block-by-block to avoid regex collisions
+            const blocks = [];
+            let remaining = text;
+
+            // 1. Protect fenced code blocks
+            remaining = remaining.replace(/```[\w]*\n([\s\S]*?)```/g, (_, code) => {
+                const idx = blocks.length;
+                blocks.push(`<pre><code>${escapeHtml(code.trim())}</code></pre>`);
+                return `\x00BLOCK${idx}\x00`;
+            });
+
+            // 2. Tables — detect pipe-row blocks
+            remaining = remaining.replace(
+                /((?:\|.+\|\n?)+)/g,
+                (match) => {
+                    const lines = match.trim().split('\n').filter(l => l.trim());
+                    // Need at least header + separator + one data row
+                    if (lines.length < 2) return match;
+                    const isSep = l => /^\|[\s|:-]+\|$/.test(l.trim());
+                    // Find separator row
+                    let sepIdx = lines.findIndex(isSep);
+                    if (sepIdx < 1) return match;
+
+                    const parseRow = (l) =>
+                        l.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+
+                    const headers = parseRow(lines[0]);
+                    const dataRows = lines.slice(sepIdx + 1);
+
+                    // Skip pure separator-only tables
+                    if (!dataRows.length) return match;
+
+                    const thead = `<tr>${headers.map(h => `<th>${inlineMarkdown(h)}</th>`).join('')}</tr>`;
+                    const tbody = dataRows.map(row => {
+                        const cells = parseRow(row);
+                        return `<tr>${cells.map(c => `<td>${inlineMarkdown(c)}</td>`).join('')}</tr>`;
+                    }).join('');
+
+                    const idx = blocks.length;
+                    blocks.push(`<table><thead>${thead}</thead><tbody>${tbody}</tbody></table>`);
+                    return `\x00BLOCK${idx}\x00`;
+                }
+            );
+
+            // 3. Horizontal rules (--- or *** on their own line) — suppress entirely
+            remaining = remaining.replace(/^[-*]{3,}\s*$/gm, '');
+
+            // 4. Headings
+            remaining = remaining.replace(/^### (.+)$/gm, (_, t) => { const i = blocks.length; blocks.push(`<h3>${inlineMarkdown(t)}</h3>`); return `\x00BLOCK${i}\x00`; });
+            remaining = remaining.replace(/^## (.+)$/gm,  (_, t) => { const i = blocks.length; blocks.push(`<h2>${inlineMarkdown(t)}</h2>`); return `\x00BLOCK${i}\x00`; });
+            remaining = remaining.replace(/^# (.+)$/gm,   (_, t) => { const i = blocks.length; blocks.push(`<h1>${inlineMarkdown(t)}</h1>`); return `\x00BLOCK${i}\x00`; });
+
+            // 5. Lists — group consecutive list items into <ul>
+            remaining = remaining.replace(/((?:^[-*] .+\n?)+)/gm, (match) => {
+                const items = match.trim().split('\n')
+                    .filter(l => /^[-*] /.test(l))
+                    .map(l => `<li>${inlineMarkdown(l.replace(/^[-*] /, ''))}</li>`)
+                    .join('');
+                const i = blocks.length;
+                blocks.push(`<ul>${items}</ul>`);
+                return `\x00BLOCK${i}\x00`;
+            });
+
+            // 6. Inline formatting on remaining text, then line breaks
+            remaining = remaining
+                .split('\n')
+                .map(line => line.startsWith('\x00BLOCK') ? line : inlineMarkdown(line))
+                .join('\n');
+
+            // Collapse 3+ blank lines to 2, convert \n\n to paragraph break, \n to <br>
+            remaining = remaining
+                .replace(/\n{3,}/g, '\n\n')
+                .replace(/\n\n/g, '<br><br>')
+                .replace(/\n/g, '<br>');
+
+            // 7. Restore protected blocks (unwrap <br> padding around blocks)
+            remaining = remaining.replace(/(<br>)*\x00BLOCK(\d+)\x00(<br>)*/g, (_, pre, idx, post) => {
+                return (pre ? '<br>' : '') + blocks[+idx] + (post ? '<br>' : '');
+            });
+
+            return remaining;
+        }
+
+        // Inline-only markdown (bold, italic, inline code, no block elements)
+        function inlineMarkdown(text) {
+            return text
+                .replace(/`([^`]+)`/g, '<code>$1</code>')
+                .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+                .replace(/\*([^*]+)\*/g, '<em>$1</em>');
         }
 
         function escapeHtml(text) {
