@@ -735,9 +735,13 @@
             loadConversations();
 
             const saved = localStorage.getItem(STORAGE_KEY_CONV);
-            if (saved) {
+            // Only restore if it's a valid UUID (Qdrant requires UUIDs)
+            const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            if (saved && isUuid.test(saved)) {
                 currentSessionId = saved;
                 loadConversation(saved);
+            } else if (saved) {
+                localStorage.removeItem(STORAGE_KEY_CONV);
             }
         }
 
