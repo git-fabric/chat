@@ -12,11 +12,14 @@ export async function createSession(adapter, opts) {
     return { sessionId: session.id, createdAt: session.createdAt };
 }
 export async function listSessions(adapter, opts) {
-    return adapter.listSessions({
+    const sessions = await adapter.listSessions({
         project: opts.project,
         limit: opts.limit ?? 20,
         state: opts.state ?? "active",
     });
+    return {
+        sessions: sessions.map((s) => ({ ...s, sessionId: s.id })),
+    };
 }
 export async function getSession(adapter, sessionId) {
     return adapter.getSession(sessionId);

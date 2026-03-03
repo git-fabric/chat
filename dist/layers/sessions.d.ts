@@ -21,7 +21,11 @@ export declare function listSessions(adapter: ChatAdapter, opts: {
     project?: string;
     limit?: number;
     state?: "active" | "archived" | "all";
-}): Promise<ChatSession[]>;
+}): Promise<{
+    sessions: Array<ChatSession & {
+        sessionId: string;
+    }>;
+}>;
 export declare function getSession(adapter: ChatAdapter, sessionId: string): Promise<ChatSession & {
     messages: import("../types.js").ChatMessage[];
 }>;

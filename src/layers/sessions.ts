@@ -30,12 +30,15 @@ export async function listSessions(
     limit?: number;
     state?: "active" | "archived" | "all";
   },
-): Promise<ChatSession[]> {
-  return adapter.listSessions({
+): Promise<{ sessions: Array<ChatSession & { sessionId: string }> }> {
+  const sessions = await adapter.listSessions({
     project: opts.project,
     limit: opts.limit ?? 20,
     state: opts.state ?? "active",
   });
+  return {
+    sessions: sessions.map((s) => ({ ...s, sessionId: s.id })),
+  };
 }
 
 export async function getSession(
