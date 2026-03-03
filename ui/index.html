@@ -1108,7 +1108,7 @@
             );
 
             // 3. Horizontal rules (--- or *** on their own line) — suppress entirely
-            remaining = remaining.replace(/^[-*]{3,}\s*$/gm, '');
+            remaining = remaining.replace(/^[ \t]*[-*]{3,}[ \t]*$/gm, '');
 
             // 4. Headings
             remaining = remaining.replace(/^### (.+)$/gm, (_, t) => { const i = blocks.length; blocks.push(`<h3>${inlineMarkdown(t)}</h3>`); return `\x00BLOCK${i}\x00`; });
@@ -1137,6 +1137,9 @@
                 .replace(/\n{3,}/g, '\n\n')
                 .replace(/\n\n/g, '<br><br>')
                 .replace(/\n/g, '<br>');
+
+            // Final pass: strip any remaining literal --- or *** lines (e.g. after <br> tags)
+            remaining = remaining.replace(/(<br>)*[ \t]*[-*]{3,}[ \t]*(<br>)*/g, '');
 
             // 7. Restore protected blocks (unwrap <br> padding around blocks)
             remaining = remaining.replace(/(<br>)*\x00BLOCK(\d+)\x00(<br>)*/g, (_, pre, idx, post) => {
