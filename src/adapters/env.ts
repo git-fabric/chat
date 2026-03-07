@@ -12,10 +12,14 @@
  * Optional:
  *   QDRANT_API_KEY      — Qdrant API key (omit for in-cluster no-auth)
  *   FABRIC_GATEWAY_URL  — fabric-gateway MCP endpoint; enables agentic tool loop
+ *   OLLAMA_ENDPOINT     — Ollama endpoint for local-llm routing lane
+ *   OLLAMA_MODEL        — Ollama model (default: qwen2.5-coder:3b)
+ *   GATEWAY_URL         — Gateway /intercept endpoint for three-lane routing
  */
 
 import { randomUUID } from "crypto";
 import { createAnthropicClient, complete as anthropicComplete, embed as voyageEmbed, pingAnthropic } from "./anthropic.js";
+import { createOllamaConfig, ollamaComplete, pingOllama } from "./ollama.js";
 import {
   COLLECTION,
   ensureCollection,
@@ -35,8 +39,10 @@ import type {
   ChatMessage,
   ChatModel,
   CompletionMessage,
+  CompletionResult,
   SearchResult,
   FabricTool,
+  RoutingLane,
 } from "../types.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -89,6 +95,8 @@ export function createAdapterFromEnv(): ChatAdapter {
   const qdrantKey = process.env.QDRANT_API_KEY ?? "";
 
   const fabricGatewayUrl = process.env.FABRIC_GATEWAY_URL ?? null;
+  const gatewayUrl = process.env.GATEWAY_URL ?? null;
+  const ollamaConfig = createOllamaConfig();
 
   const anthropic = createAnthropicClient(anthropicKey);
 
@@ -243,10 +251,93 @@ export function createAdapterFromEnv(): ChatAdapter {
       return message;
     },
 
-    // ── LLM ───────────────────────────────────────────────────────────────────
+    // ── LLM (three-lane routing) ─────────────────────────────────────────────
+    //
+    // Lane 1: deterministic (>= 0.95) — gateway resolved with high confidence
+    // Lane 2: local-llm (>= floor)    — Ollama handles routine completions
+    // Lane 3: claude (< floor)         — Anthropic API, default route 0.0.0.0/0
+    //
+    // When GATEWAY_URL is set, we ask the gateway's /intercept endpoint first.
+    // It consults the F-RIB, queries the authoritative fabric, and returns a
+    // routing_lane + context. We use that to decide where to send the completion.
+    //
+    // When no gateway: try Ollama directly if configured, else fall through to Claude.
 
-    async complete(messages, opts) {
-      return anthropicComplete(anthropic, opts.model, opts.systemPrompt, messages, opts.maxTokens);
+    async complete(messages, opts): Promise<CompletionResult> {
+      const lastMessage = messages[messages.length - 1]?.content ?? "";
+
+      // ── Gateway intercept (if available) ──────────────────────────
+      if (gatewayUrl) {
+        try {
+          const interceptRes = await fetch(`${gatewayUrl}/intercept`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              query_text: lastMessage,
+              domain_hint: opts.systemPrompt ? "fabric.chat" : undefined,
+              requestor_fabric_id: "fabric-chat",
+            }),
+            signal: AbortSignal.timeout(5000),
+          });
+
+          if (interceptRes.ok) {
+            const intercept = await interceptRes.json() as {
+              lane: RoutingLane;
+              confidence: number;
+              context?: string;
+            };
+
+            // Deterministic — gateway already has the answer
+            if (intercept.lane === "deterministic" && intercept.context) {
+              return {
+                content: intercept.context,
+                inputTokens: 0,
+                outputTokens: 0,
+                model: "gateway-deterministic",
+                routingLane: "deterministic",
+              };
+            }
+
+            // Local-LLM — use Ollama with injected context
+            if (intercept.lane === "local-llm" && ollamaConfig) {
+              const contextMessages: CompletionMessage[] = intercept.context
+                ? [{ role: "system", content: `Context from fabric knowledge base:\n\n${intercept.context}` }, ...messages]
+                : messages;
+              try {
+                const result = await ollamaComplete(ollamaConfig, opts.systemPrompt, contextMessages);
+                return { ...result, routingLane: "local-llm" };
+              } catch {
+                // Ollama failed — fall through to Claude
+              }
+            }
+
+            // Claude lane or Ollama unavailable — fall through with context injection
+            if (intercept.context) {
+              const augmented: CompletionMessage[] = [
+                { role: "system", content: `Context from fabric knowledge base:\n\n${intercept.context}` },
+                ...messages,
+              ];
+              const result = await anthropicComplete(anthropic, opts.model, opts.systemPrompt, augmented, opts.maxTokens);
+              return { ...result, routingLane: "claude" };
+            }
+          }
+        } catch {
+          // Gateway unreachable — fall through to direct routing
+        }
+      }
+
+      // ── Direct Ollama (no gateway, but Ollama configured) ─────────
+      if (ollamaConfig) {
+        try {
+          return await ollamaComplete(ollamaConfig, opts.systemPrompt, messages);
+        } catch {
+          // Ollama failed — fall through to Claude
+        }
+      }
+
+      // ── Claude (default route 0.0.0.0/0) ──────────────────────────
+      const result = await anthropicComplete(anthropic, opts.model, opts.systemPrompt, messages, opts.maxTokens);
+      return { ...result, routingLane: "claude" };
     },
 
     // ── Semantic search ───────────────────────────────────────────────────────
@@ -320,9 +411,12 @@ export function createAdapterFromEnv(): ChatAdapter {
       } catch { /* measure regardless */ }
       const qdrantLatency = Date.now() - qdrantStart;
 
+      const ollamaHealth = ollamaConfig ? await pingOllama(ollamaConfig) : undefined;
+
       return {
         anthropic: { latencyMs: anthropicLatency },
         qdrant: { latencyMs: qdrantLatency },
+        ...(ollamaHealth ? { ollama: ollamaHealth } : {}),
       };
     },
 

@@ -18,6 +18,7 @@ import type {
   ChatModel,
   CompletionMessage,
   FabricTool,
+  RoutingLane,
 } from "../types.js";
 
 export interface SendResult {
@@ -27,6 +28,7 @@ export interface SendResult {
   inputTokens: number;
   outputTokens: number;
   model: ChatModel;
+  routingLane?: RoutingLane;
 }
 
 // ── Anthropic tool conversion ─────────────────────────────────────────────────
@@ -158,7 +160,7 @@ export async function sendMessage(
     typeof adapter.listFabricTools === "function" &&
     typeof adapter.callFabricTool === "function";
 
-  let result: { content: string; inputTokens: number; outputTokens: number };
+  let result: { content: string; inputTokens: number; outputTokens: number; routingLane?: RoutingLane };
 
   if (hasFabricGateway) {
     let fabricTools: FabricTool[] = [];
@@ -225,6 +227,7 @@ export async function sendMessage(
     inputTokens: result.inputTokens,
     outputTokens: result.outputTokens,
     model: session.model,
+    routingLane: result.routingLane,
   };
 }
 
