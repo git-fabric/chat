@@ -8,10 +8,14 @@
 
 // ── Domain types ─────────────────────────────────────────────────────────────
 
-export type ChatModel =
+// Claude models (default route — 0.0.0.0/0)
+export type ClaudeModel =
   | "claude-opus-4-6"
   | "claude-sonnet-4-6"
   | "claude-haiku-4-5-20251001";
+
+// Any model — Claude or Ollama (e.g. qwen2.5-coder:3b, llama3.2:3b)
+export type ChatModel = ClaudeModel | (string & {});
 
 export interface ChatSession {
   id: string;             // UUID v4
@@ -46,11 +50,14 @@ export interface CompletionMessage {
   content: string;
 }
 
+export type RoutingLane = "deterministic" | "local-llm" | "claude";
+
 export interface CompletionResult {
   content: string;
   inputTokens: number;
   outputTokens: number;
   model: ChatModel;
+  routingLane?: RoutingLane;
 }
 
 // ── Search types ─────────────────────────────────────────────────────────────
@@ -70,6 +77,7 @@ export interface ChatStats {
 export interface ChatHealth {
   anthropic: { latencyMs: number };
   qdrant: { latencyMs: number };
+  ollama?: { latencyMs: number; available: boolean };
 }
 
 // ── Index entry (fast listing without reading all session files) ──────────────
