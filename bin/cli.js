@@ -50,10 +50,10 @@ async function registerWithGateway() {
     tailscale_node: "fabric-chat",
     worker_pool: { total: 0, healthy: 0, workers: [] },
     routes: [
-      { prefix: "fabric.chat", local_pref: 100, description: "AI conversation sessions, semantic search, context threading" },
-      { prefix: "fabric.chat.sessions", local_pref: 100, description: "Session management — create, list, archive, delete" },
-      { prefix: "fabric.chat.messages", local_pref: 100, description: "Messaging — send, list, context injection" },
-      { prefix: "fabric.chat.search", local_pref: 100, description: "Semantic search over conversation history" },
+      { prefix: "fabric.chat", local_pref: 100, confidence_floor: 0.7, description: "AI conversation sessions, semantic search, context threading" },
+      { prefix: "fabric.chat.sessions", local_pref: 100, confidence_floor: 0.7, description: "Session management — create, list, archive, delete" },
+      { prefix: "fabric.chat.messages", local_pref: 100, confidence_floor: 0.7, description: "Messaging — send, list, context injection" },
+      { prefix: "fabric.chat.search", local_pref: 100, confidence_floor: 0.7, description: "Semantic search over conversation history" },
     ],
   };
   try {
