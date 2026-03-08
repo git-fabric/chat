@@ -11,7 +11,8 @@
  * Vectors:    512-dim Voyage AI voyage-3-lite, Cosine distance
  */
 export declare const COLLECTION = "chat_fabric__v2";
-export declare const EMBEDDING_DIMS = 512;
+export declare let EMBEDDING_DIMS: number;
+export declare function setEmbeddingDims(dims: number): void;
 export interface QdrantPoint {
     id: string;
     vector: number[];

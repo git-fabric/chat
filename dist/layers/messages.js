@@ -102,10 +102,11 @@ export async function sendMessage(adapter, sessionId, content, maxTokens = 8192)
         })),
         { role: "user", content },
     ];
+    const isOllama = !!process.env.OLLAMA_ENDPOINT;
     const hasFabricGateway = typeof adapter.listFabricTools === "function" &&
         typeof adapter.callFabricTool === "function";
     let result;
-    if (hasFabricGateway) {
+    if (hasFabricGateway && !isOllama) {
         let fabricTools = [];
         try {
             const allTools = await adapter.listFabricTools();
@@ -156,6 +157,7 @@ export async function sendMessage(adapter, sessionId, content, maxTokens = 8192)
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
         model: session.model,
+        routingLane: result.routingLane,
     };
 }
 export async function listMessages(adapter, sessionId, limit = 50, offset = 0) {

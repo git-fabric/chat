@@ -69,10 +69,30 @@ export async function ollamaComplete(
   };
 }
 
+export async function embedOllama(
+  endpoint: string,
+  model: string,
+  text: string,
+): Promise<number[]> {
+  const res = await fetch(`${endpoint}/api/embed`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model, input: text }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Ollama embed failed (${res.status}): ${body}`);
+  }
+
+  const data = await res.json() as { embeddings: number[][] };
+  return data.embeddings[0];
+}
+
 export async function pingOllama(config: OllamaConfig): Promise<{ latencyMs: number; available: boolean }> {
   const start = Date.now();
   try {
-    const res = await fetch(`${config.endpoint}/api/tags`, { signal: AbortSignal.timeout(5000) });
+    const res = await fetch(`${config.endpoint}/`, { signal: AbortSignal.timeout(5000) });
     return { latencyMs: Date.now() - start, available: res.ok };
   } catch {
     return { latencyMs: Date.now() - start, available: false };

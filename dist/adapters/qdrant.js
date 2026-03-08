@@ -11,7 +11,10 @@
  * Vectors:    512-dim Voyage AI voyage-3-lite, Cosine distance
  */
 export const COLLECTION = "chat_fabric__v2";
-export const EMBEDDING_DIMS = 512;
+export let EMBEDDING_DIMS = 512;
+export function setEmbeddingDims(dims) {
+    EMBEDDING_DIMS = dims;
+}
 // ── Collection bootstrap ──────────────────────────────────────────────────────
 export async function ensureCollection(qdrantUrl, qdrantKey) {
     const url = `${qdrantUrl}/collections/${COLLECTION}`;

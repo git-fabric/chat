@@ -9,7 +9,7 @@
  * Inputs:  ChatAdapter + message params
  * Outputs: ChatMessage objects / send results
  */
-import type { ChatAdapter, ChatMessage, ChatModel } from "../types.js";
+import type { ChatAdapter, ChatMessage, ChatModel, RoutingLane } from "../types.js";
 export interface SendResult {
     messageId: string;
     role: "assistant";
@@ -17,6 +17,7 @@ export interface SendResult {
     inputTokens: number;
     outputTokens: number;
     model: ChatModel;
+    routingLane?: RoutingLane;
 }
 export declare function sendMessage(adapter: ChatAdapter, sessionId: string, content: string, maxTokens?: number): Promise<SendResult>;
 export declare function listMessages(adapter: ChatAdapter, sessionId: string, limit?: number, offset?: number): Promise<ChatMessage[]>;
