@@ -15,14 +15,14 @@ import { selectRelevantTools } from "../adapters/gateway.js";
 // Used to detect which fabric app a user message is about, so we can pre-fetch
 // live data before sending to Ollama (which can't do tool_use).
 const MOE_ROUTES = [
-    { app: "unifi", service: "fabric-unifi", port: 8200, priority: 100, keywords: ["unifi", "network", "wifi", "wireless", "ssid", "access point", "ap", "client", "bandwidth", "switch", "vlan", "ubiquiti"] },
-    { app: "proxmox", service: "fabric-proxmox", port: 8200, priority: 100, keywords: ["proxmox", "pve", "vm", "virtual machine", "lxc", "hypervisor", "qemu", "snapshot"] },
+    { app: "unifi", service: "fabric-unifi", port: 8200, priority: 100, keywords: ["unifi", "wifi", "wireless", "ssid", "access point", "ubiquiti", "vlan", "ap "] },
+    { app: "proxmox", service: "fabric-proxmox", port: 8200, priority: 100, keywords: ["proxmox", "pve", "vm", "virtual machine", "lxc", "hypervisor", "qemu"] },
     { app: "k8s", service: "fabric-k8s", port: 8200, priority: 100, keywords: ["kubernetes", "k8s", "k3s", "pod", "deployment", "namespace", "kubectl", "ingress", "helm", "statefulset"] },
-    { app: "cloudflare", service: "fabric-cloudflare", port: 8200, priority: 90, keywords: ["cloudflare", "dns", "zone", "record", "cname", "cache", "worker", "tunnel"] },
-    { app: "tailscale", service: "fabric-tailscale", port: 8200, priority: 90, keywords: ["tailscale", "vpn", "mesh", "acl", "exit node", "tailnet", "subnet"] },
+    { app: "cloudflare", service: "fabric-cloudflare", port: 8200, priority: 90, keywords: ["cloudflare", "dns record", "zone", "cname", "cache purge", "worker", "tunnel"] },
+    { app: "tailscale", service: "fabric-tailscale", port: 8200, priority: 90, keywords: ["tailscale", "vpn", "tailnet", "exit node", "subnet router", "magic dns"] },
     { app: "cve", service: "fabric-cve", port: 8200, priority: 90, keywords: ["cve", "vulnerability", "vuln", "patch", "security scan", "advisory", "exploit"] },
     { app: "sandfly", service: "fabric-sandfly", port: 8200, priority: 90, keywords: ["sandfly", "intrusion", "threat", "malware", "rootkit", "ioc"] },
-    { app: "git", service: "fabric-git", port: 8200, priority: 80, keywords: ["git", "commit", "branch", "pull request", "pr", "repo", "merge", "release"] },
+    { app: "git", service: "fabric-git", port: 8200, priority: 80, keywords: ["git repo", "commit", "branch", "pull request", "pr ", "merge", "release"] },
 ];
 function detectFabricApp(message) {
     const lower = message.toLowerCase();
@@ -39,57 +39,35 @@ function detectFabricApp(message) {
     }
     return best ? best.route : null;
 }
-/** Call a fabric app's aiana_query endpoint directly via in-cluster service */
-async function queryFabricApp(service, port, queryText) {
-    const url = `http://${service}.fabric-sdk:${port}/mcp/tools/call`;
-    try {
-        const res = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: "aiana_query", arguments: { query_text: queryText } }),
-            signal: AbortSignal.timeout(10000),
-        });
-        if (!res.ok)
-            return null;
-        const data = await res.json();
-        if (data.context && data.context.length > 0)
-            return data.context;
-        return null;
-    }
-    catch {
-        return null;
-    }
-}
-/** Call a fabric app's tools/list endpoint to discover available tools, then call the first summary-like tool */
-async function fetchFabricSummary(service, port, queryText) {
+/** Best summary tool for each fabric app — curated for rich output */
+const PREFERRED_SUMMARY_TOOL = {
+    unifi: "unifi_network_status",
+    proxmox: "pve_cluster_status",
+    k8s: "k8s_cluster_info",
+    cloudflare: "cf_list_zones",
+    tailscale: "ts_health",
+    cve: "cve_queue_stats",
+    sandfly: "sandfly_get_alerts",
+    git: "git_repo_list",
+};
+/** Fetch live data from a fabric app by calling its best summary tool */
+async function fetchFabricSummary(service, port, app) {
     const baseUrl = `http://${service}.fabric-sdk:${port}`;
-    // First try aiana_query
-    const aianaResult = await queryFabricApp(service, port, queryText);
-    if (aianaResult)
-        return aianaResult;
-    // Fallback: list tools and call the first one that looks like a summary/list/health tool
+    const preferredTool = PREFERRED_SUMMARY_TOOL[app];
     try {
-        const toolsRes = await fetch(`${baseUrl}/tools`, {
-            signal: AbortSignal.timeout(5000),
-        });
-        if (!toolsRes.ok)
-            return null;
-        const tools = await toolsRes.json();
-        // Find a summary/health/status/list tool
-        const summaryTool = tools.find((t) => /health|status|summary|overview|list.*site|site.*health|cluster.*status|list.*device/i.test(t.name + " " + (t.description ?? ""))) ?? tools[0];
-        if (!summaryTool)
-            return null;
+        // Call the preferred summary tool directly
+        const toolName = preferredTool ?? `${app}_health`;
         const callRes = await fetch(`${baseUrl}/tools/call`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: summaryTool.name, arguments: {} }),
+            body: JSON.stringify({ name: toolName, arguments: {} }),
             signal: AbortSignal.timeout(15000),
         });
         if (!callRes.ok)
             return null;
         const result = await callRes.json();
         const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-        return text.length > 0 ? `[${summaryTool.name}]\n${text}` : null;
+        return text.length > 0 ? `[${toolName}]\n${text}` : null;
     }
     catch {
         return null;
@@ -194,7 +172,7 @@ export async function sendMessage(adapter, sessionId, content, maxTokens = 8192)
         const detected = detectFabricApp(content);
         if (detected) {
             try {
-                const context = await fetchFabricSummary(detected.service, detected.port, content);
+                const context = await fetchFabricSummary(detected.service, detected.port, detected.app);
                 if (context) {
                     history.splice(history.length - 1, 0, {
                         role: "user",
