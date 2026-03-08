@@ -22,6 +22,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/bin ./bin
+COPY ui/ ./ui/
 
 USER fabric
 ENV NODE_ENV=production
