@@ -747,17 +747,19 @@
 
             const text = await res.text();
 
-            // Gateway responds in SSE format: "data: {...}\n\n"
+            // Server responds in SSE format: "data: {...}\n\n"
             for (const line of text.split('\n')) {
                 if (!line.startsWith('data: ')) continue;
                 const payload = JSON.parse(line.slice(6));
                 if (payload.error) throw new Error(payload.error.message ?? JSON.stringify(payload.error));
-                if (payload.result?.content?.[0]?.text) {
-                    return JSON.parse(payload.result.content[0].text);
+                if (payload.result?.isError) throw new Error(payload.result.content?.[0]?.text ?? 'Tool error');
+                const raw = payload.result?.content?.[0]?.text;
+                if (raw != null) {
+                    try { return JSON.parse(raw); } catch { return raw; }
                 }
             }
 
-            throw new Error('No data in gateway response');
+            throw new Error('No data in response');
         }
 
         // ── DOM refs ──────────────────────────────────────────────────────────────
