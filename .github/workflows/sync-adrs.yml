@@ -1,0 +1,36 @@
+name: Sync global ADRs
+
+on:
+  repository_dispatch:
+    types: [sync-global-adrs]
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Pull latest global ADRs
+        run: |
+          git clone --depth 1 https://github.com/git-fabric/adr /tmp/global-adrs
+          mkdir -p adr/global
+          rm -rf adr/global/*
+          cp -r /tmp/global-adrs/docs/* adr/global/
+          rm -rf /tmp/global-adrs
+
+      - name: Create PR with updates
+        uses: peter-evans/create-pull-request@v6
+        with:
+          title: "chore: sync global ADRs"
+          branch: chore/sync-global-adrs
+          commit-message: "chore: sync global ADRs from git-fabric/adr"
+          body: |
+            Automated sync of org-wide ADRs from [git-fabric/adr](https://github.com/git-fabric/adr).
+
+            If `adr/global/` has no changes, this PR will not be created.
+          delete-branch: true
+          labels: documentation
