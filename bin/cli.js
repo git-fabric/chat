@@ -6,6 +6,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createServer } from "node:http";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const UI_HTML = readFileSync(join(__dirname, "..", "ui", "index.html"), "utf8");
 
 const app = createApp();
 const library = new Library();
@@ -153,11 +159,16 @@ if (httpPort) {
       }
       return;
     }
-    if (req.url === "/mcp" || req.url === "/") {
+    if (req.url === "/mcp") {
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       const server = buildServer();
       await server.connect(transport);
       await transport.handleRequest(req, res, undefined);
+      return;
+    }
+    if (req.url === "/" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(UI_HTML);
       return;
     }
     res.writeHead(404).end("not found");
