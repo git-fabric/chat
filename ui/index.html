@@ -954,7 +954,14 @@
                 scrollToBottom();
             } catch (err) {
                 console.error('loadConversation:', err);
-                showError(`Failed to load conversation: ${err.message}`);
+                if (/not found/i.test(err.message)) {
+                    localStorage.removeItem(STORAGE_KEY_CONV);
+                    currentSessionId = null;
+                    emptyState.classList.remove('hidden');
+                    messagesContainer.style.display = 'none';
+                } else {
+                    showError(`Failed to load conversation: ${err.message}`);
+                }
             }
         }
 
