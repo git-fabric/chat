@@ -12,6 +12,9 @@
  * Optional:
  *   QDRANT_API_KEY      — Qdrant API key (omit for in-cluster no-auth)
  *   FABRIC_GATEWAY_URL  — fabric-gateway MCP endpoint; enables agentic tool loop
+ *   OLLAMA_ENDPOINT     — Ollama endpoint for local-llm routing lane
+ *   OLLAMA_MODEL        — Ollama model (default: qwen2.5-coder:3b)
+ *   GATEWAY_URL         — Gateway /intercept endpoint for three-lane routing
  */
 import { selectRelevantTools } from "./gateway.js";
 import type { ChatAdapter, FabricTool } from "../types.js";

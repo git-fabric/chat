@@ -12,10 +12,14 @@
  * Optional:
  *   QDRANT_API_KEY      — Qdrant API key (omit for in-cluster no-auth)
  *   FABRIC_GATEWAY_URL  — fabric-gateway MCP endpoint; enables agentic tool loop
+ *   OLLAMA_ENDPOINT     — Ollama endpoint for local-llm routing lane
+ *   OLLAMA_MODEL        — Ollama model (default: qwen2.5-coder:3b)
+ *   GATEWAY_URL         — Gateway /intercept endpoint for three-lane routing
  */
 import { randomUUID } from "crypto";
 import { createAnthropicClient, complete as anthropicComplete, embed as voyageEmbed, pingAnthropic } from "./anthropic.js";
-import { ensureCollection, upsertPoint, upsertPointNoVec, setPayload, deleteByFilter, deleteById, search as qdrantSearch, scroll, getPoint, } from "./qdrant.js";
+import { createOllamaConfig, ollamaComplete, embedOllama, pingOllama } from "./ollama.js";
+import { ensureCollection, upsertPoint, upsertPointNoVec, setPayload, deleteByFilter, deleteById, search as qdrantSearch, scroll, getPoint, setEmbeddingDims, } from "./qdrant.js";
 import { listTools as gatewayListTools, callTool as gatewayCallTool, selectRelevantTools } from "./gateway.js";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DEFAULT_MODEL = "claude-sonnet-4-6";
@@ -46,15 +50,22 @@ function isoToday() {
 }
 // ── createAdapterFromEnv ──────────────────────────────────────────────────────
 export function createAdapterFromEnv() {
+    const ollamaConfig = createOllamaConfig();
+    const ollamaEndpoint = process.env.OLLAMA_ENDPOINT?.replace(/\/$/, "");
+    const ollamaEmbedModel = process.env.OLLAMA_EMBED_MODEL ?? "nomic-embed-text";
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
-    if (!anthropicKey)
+    if (!anthropicKey && !ollamaEndpoint)
         throw new Error("ANTHROPIC_API_KEY required");
     const qdrantUrl = process.env.QDRANT_URL;
     if (!qdrantUrl)
         throw new Error("QDRANT_URL required");
     const qdrantKey = process.env.QDRANT_API_KEY ?? "";
     const fabricGatewayUrl = process.env.FABRIC_GATEWAY_URL ?? null;
-    const anthropic = createAnthropicClient(anthropicKey);
+    const gatewayUrl = process.env.GATEWAY_URL ?? null;
+    if (ollamaEndpoint) {
+        setEmbeddingDims(768);
+    }
+    const anthropic = anthropicKey ? createAnthropicClient(anthropicKey) : null;
     // Lazy collection bootstrap — runs once on first use
     let collectionReady = false;
     async function boot() {
@@ -178,17 +189,101 @@ export function createAdapterFromEnv() {
             }
             return message;
         },
-        // ── LLM ───────────────────────────────────────────────────────────────────
+        // ── LLM (three-lane routing) ─────────────────────────────────────────────
+        //
+        // Lane 1: deterministic (>= 0.95) — gateway resolved with high confidence
+        // Lane 2: local-llm (>= floor)    — Ollama handles routine completions
+        // Lane 3: claude (< floor)         — Anthropic API, default route 0.0.0.0/0
+        //
+        // When GATEWAY_URL is set, we ask the gateway's /intercept endpoint first.
+        // It consults the F-RIB, queries the authoritative fabric, and returns a
+        // routing_lane + context. We use that to decide where to send the completion.
+        //
+        // When no gateway: try Ollama directly if configured, else fall through to Claude.
         async complete(messages, opts) {
-            return anthropicComplete(anthropic, opts.model, opts.systemPrompt, messages, opts.maxTokens);
+            const lastMessage = messages[messages.length - 1]?.content ?? "";
+            // ── Gateway intercept (if available) ──────────────────────────
+            if (gatewayUrl) {
+                try {
+                    const interceptRes = await fetch(`${gatewayUrl}/intercept`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            query_text: lastMessage,
+                            domain_hint: opts.systemPrompt ? "fabric.chat" : undefined,
+                            requestor_fabric_id: "fabric-chat",
+                        }),
+                        signal: AbortSignal.timeout(5000),
+                    });
+                    if (interceptRes.ok) {
+                        const intercept = await interceptRes.json();
+                        // Deterministic — gateway already has the answer
+                        if (intercept.lane === "deterministic" && intercept.context) {
+                            return {
+                                content: intercept.context,
+                                inputTokens: 0,
+                                outputTokens: 0,
+                                model: "gateway-deterministic",
+                                routingLane: "deterministic",
+                            };
+                        }
+                        // Local-LLM — use Ollama with injected context
+                        if (intercept.lane === "local-llm" && ollamaConfig) {
+                            const contextMessages = intercept.context
+                                ? [{ role: "system", content: `Context from fabric knowledge base:\n\n${intercept.context}` }, ...messages]
+                                : messages;
+                            try {
+                                const result = await ollamaComplete(ollamaConfig, opts.systemPrompt, contextMessages);
+                                return { ...result, routingLane: "local-llm" };
+                            }
+                            catch {
+                                // Ollama failed — fall through to Claude
+                            }
+                        }
+                        // Claude lane or Ollama unavailable — fall through with context injection
+                        if (intercept.context && anthropic) {
+                            const augmented = [
+                                { role: "system", content: `Context from fabric knowledge base:\n\n${intercept.context}` },
+                                ...messages,
+                            ];
+                            const result = await anthropicComplete(anthropic, opts.model, opts.systemPrompt, augmented, opts.maxTokens);
+                            return { ...result, routingLane: "claude" };
+                        }
+                    }
+                }
+                catch {
+                    // Gateway unreachable — fall through to direct routing
+                }
+            }
+            // ── Direct Ollama (no gateway, but Ollama configured) ─────────
+            if (ollamaConfig) {
+                try {
+                    return await ollamaComplete(ollamaConfig, opts.systemPrompt, messages);
+                }
+                catch {
+                    if (!anthropic)
+                        throw new Error("Ollama completion failed and no Anthropic API key configured");
+                    // Ollama failed — fall through to Claude
+                }
+            }
+            // ── Claude (default route 0.0.0.0/0) ──────────────────────────
+            if (!anthropic)
+                throw new Error("ANTHROPIC_API_KEY required for Claude completions");
+            const result = await anthropicComplete(anthropic, opts.model, opts.systemPrompt, messages, opts.maxTokens);
+            return { ...result, routingLane: "claude" };
         },
         // ── Semantic search ───────────────────────────────────────────────────────
         async embed(text) {
+            if (ollamaEndpoint) {
+                return embedOllama(ollamaEndpoint, ollamaEmbedModel, text);
+            }
             return voyageEmbed(anthropicKey, text);
         },
         async embedAndStore(message) {
             await boot();
-            const vector = await voyageEmbed(anthropicKey, message.content);
+            const vector = ollamaEndpoint
+                ? await embedOllama(ollamaEndpoint, ollamaEmbedModel, message.content)
+                : await voyageEmbed(anthropicKey, message.content);
             // Upsert with real vector — overwrites the zero-vector placeholder
             await upsertPoint(qdrantUrl, qdrantKey, {
                 id: message.id,
@@ -226,16 +321,18 @@ export function createAdapterFromEnv() {
             return { totalSessions, totalMessages, tokensToday };
         },
         async health() {
-            const anthropicLatency = await pingAnthropic(anthropic);
+            const anthropicLatency = anthropic ? await pingAnthropic(anthropic) : 0;
             const qdrantStart = Date.now();
             try {
                 await fetch(`${qdrantUrl}/healthz`, { headers: { "api-key": qdrantKey } });
             }
             catch { /* measure regardless */ }
             const qdrantLatency = Date.now() - qdrantStart;
+            const ollamaHealth = ollamaConfig ? await pingOllama(ollamaConfig) : undefined;
             return {
                 anthropic: { latencyMs: anthropicLatency },
                 qdrant: { latencyMs: qdrantLatency },
+                ...(ollamaHealth ? { ollama: ollamaHealth } : {}),
             };
         },
         // ── Fabric gateway (optional) ─────────────────────────────────────────────

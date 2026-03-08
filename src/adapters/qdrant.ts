@@ -12,7 +12,11 @@
  */
 
 export const COLLECTION = "chat_fabric__v2";
-export const EMBEDDING_DIMS = 512;
+export let EMBEDDING_DIMS = 512;
+
+export function setEmbeddingDims(dims: number): void {
+  EMBEDDING_DIMS = dims;
+}
 
 // ── Qdrant REST types ─────────────────────────────────────────────────────────
 

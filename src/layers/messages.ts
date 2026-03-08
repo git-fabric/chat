@@ -156,13 +156,14 @@ export async function sendMessage(
     { role: "user", content },
   ];
 
+  const isOllama = !!process.env.OLLAMA_ENDPOINT;
   const hasFabricGateway =
     typeof adapter.listFabricTools === "function" &&
     typeof adapter.callFabricTool === "function";
 
   let result: { content: string; inputTokens: number; outputTokens: number; routingLane?: RoutingLane };
 
-  if (hasFabricGateway) {
+  if (hasFabricGateway && !isOllama) {
     let fabricTools: FabricTool[] = [];
     try {
       const allTools = await adapter.listFabricTools!();

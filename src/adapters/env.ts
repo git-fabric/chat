@@ -19,7 +19,7 @@
 
 import { randomUUID } from "crypto";
 import { createAnthropicClient, complete as anthropicComplete, embed as voyageEmbed, pingAnthropic } from "./anthropic.js";
-import { createOllamaConfig, ollamaComplete, pingOllama } from "./ollama.js";
+import { createOllamaConfig, ollamaComplete, embedOllama, pingOllama } from "./ollama.js";
 import {
   COLLECTION,
   ensureCollection,
@@ -31,6 +31,7 @@ import {
   search as qdrantSearch,
   scroll,
   getPoint,
+  setEmbeddingDims,
 } from "./qdrant.js";
 import { listTools as gatewayListTools, callTool as gatewayCallTool, selectRelevantTools } from "./gateway.js";
 import type {
@@ -86,8 +87,12 @@ function isoToday(): string {
 // ── createAdapterFromEnv ──────────────────────────────────────────────────────
 
 export function createAdapterFromEnv(): ChatAdapter {
+  const ollamaConfig = createOllamaConfig();
+  const ollamaEndpoint = process.env.OLLAMA_ENDPOINT?.replace(/\/$/, "");
+  const ollamaEmbedModel = process.env.OLLAMA_EMBED_MODEL ?? "nomic-embed-text";
+
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
-  if (!anthropicKey) throw new Error("ANTHROPIC_API_KEY required");
+  if (!anthropicKey && !ollamaEndpoint) throw new Error("ANTHROPIC_API_KEY required");
 
   const qdrantUrl = process.env.QDRANT_URL;
   if (!qdrantUrl) throw new Error("QDRANT_URL required");
@@ -96,9 +101,12 @@ export function createAdapterFromEnv(): ChatAdapter {
 
   const fabricGatewayUrl = process.env.FABRIC_GATEWAY_URL ?? null;
   const gatewayUrl = process.env.GATEWAY_URL ?? null;
-  const ollamaConfig = createOllamaConfig();
 
-  const anthropic = createAnthropicClient(anthropicKey);
+  if (ollamaEndpoint) {
+    setEmbeddingDims(768);
+  }
+
+  const anthropic = anthropicKey ? createAnthropicClient(anthropicKey) : null;
 
   // Lazy collection bootstrap — runs once on first use
   let collectionReady = false;
@@ -312,7 +320,7 @@ export function createAdapterFromEnv(): ChatAdapter {
             }
 
             // Claude lane or Ollama unavailable — fall through with context injection
-            if (intercept.context) {
+            if (intercept.context && anthropic) {
               const augmented: CompletionMessage[] = [
                 { role: "system", content: `Context from fabric knowledge base:\n\n${intercept.context}` },
                 ...messages,
@@ -331,11 +339,13 @@ export function createAdapterFromEnv(): ChatAdapter {
         try {
           return await ollamaComplete(ollamaConfig, opts.systemPrompt, messages);
         } catch {
+          if (!anthropic) throw new Error("Ollama completion failed and no Anthropic API key configured");
           // Ollama failed — fall through to Claude
         }
       }
 
       // ── Claude (default route 0.0.0.0/0) ──────────────────────────
+      if (!anthropic) throw new Error("ANTHROPIC_API_KEY required for Claude completions");
       const result = await anthropicComplete(anthropic, opts.model, opts.systemPrompt, messages, opts.maxTokens);
       return { ...result, routingLane: "claude" };
     },
@@ -343,12 +353,17 @@ export function createAdapterFromEnv(): ChatAdapter {
     // ── Semantic search ───────────────────────────────────────────────────────
 
     async embed(text) {
-      return voyageEmbed(anthropicKey, text);
+      if (ollamaEndpoint) {
+        return embedOllama(ollamaEndpoint, ollamaEmbedModel, text);
+      }
+      return voyageEmbed(anthropicKey!, text);
     },
 
     async embedAndStore(message) {
       await boot();
-      const vector = await voyageEmbed(anthropicKey, message.content);
+      const vector = ollamaEndpoint
+        ? await embedOllama(ollamaEndpoint, ollamaEmbedModel, message.content)
+        : await voyageEmbed(anthropicKey!, message.content);
       // Upsert with real vector — overwrites the zero-vector placeholder
       await upsertPoint(qdrantUrl!, qdrantKey, {
         id: message.id,
@@ -403,7 +418,7 @@ export function createAdapterFromEnv(): ChatAdapter {
     },
 
     async health() {
-      const anthropicLatency = await pingAnthropic(anthropic);
+      const anthropicLatency = anthropic ? await pingAnthropic(anthropic) : 0;
 
       const qdrantStart = Date.now();
       try {

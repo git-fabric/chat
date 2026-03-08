@@ -5,7 +5,8 @@
  * Anthropic / Qdrant / GitHub client implementation.
  * Consumers provide concrete adapters at runtime.
  */
-export type ChatModel = "claude-opus-4-6" | "claude-sonnet-4-6" | "claude-haiku-4-5-20251001";
+export type ClaudeModel = "claude-opus-4-6" | "claude-sonnet-4-6" | "claude-haiku-4-5-20251001";
+export type ChatModel = ClaudeModel | (string & {});
 export interface ChatSession {
     id: string;
     title?: string;
@@ -34,11 +35,13 @@ export interface CompletionMessage {
     role: string;
     content: string;
 }
+export type RoutingLane = "deterministic" | "local-llm" | "claude";
 export interface CompletionResult {
     content: string;
     inputTokens: number;
     outputTokens: number;
     model: ChatModel;
+    routingLane?: RoutingLane;
 }
 export interface SearchResult extends ChatMessage {
     score: number;
@@ -54,6 +57,10 @@ export interface ChatHealth {
     };
     qdrant: {
         latencyMs: number;
+    };
+    ollama?: {
+        latencyMs: number;
+        available: boolean;
     };
 }
 export interface SessionIndexEntry {
