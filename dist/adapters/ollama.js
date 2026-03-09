@@ -14,6 +14,21 @@ export function createOllamaConfig() {
         model: process.env.OLLAMA_MODEL || "qwen2.5-coder:3b",
     };
 }
+/** Scale num_predict based on the last user message length.
+ *  Short inputs (greetings, single words) → 128 tokens max
+ *  Medium inputs (questions)              → 512 tokens max
+ *  Long inputs (analysis, multi-context)  → 1024 tokens max */
+function adaptiveNumPredict(messages) {
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    if (!lastUser)
+        return 512;
+    const len = lastUser.content.length;
+    if (len < 20)
+        return 128;
+    if (len < 200)
+        return 512;
+    return 1024;
+}
 export async function ollamaComplete(config, systemPrompt, messages) {
     const ollamaMessages = [];
     if (systemPrompt) {
@@ -32,7 +47,7 @@ export async function ollamaComplete(config, systemPrompt, messages) {
             messages: ollamaMessages,
             stream: false,
             keep_alive: "30m",
-            options: { num_predict: 512 },
+            options: { num_predict: adaptiveNumPredict(messages) },
         }),
     });
     if (!res.ok) {
@@ -66,7 +81,7 @@ export async function* ollamaCompleteStream(config, systemPrompt, messages) {
             messages: ollamaMessages,
             stream: true,
             keep_alive: "30m",
-            options: { num_predict: 512 },
+            options: { num_predict: adaptiveNumPredict(messages) },
         }),
     });
     if (!res.ok) {

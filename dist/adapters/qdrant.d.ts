@@ -7,8 +7,12 @@
  * Sessions and messages are both stored in a single collection with
  * a `_type` field discriminating them.
  *
+ * Supports both Qdrant Cloud (with API key) and local/in-cluster
+ * Qdrant (without authentication). When QDRANT_API_KEY is empty or
+ * unset, the api-key header is omitted entirely.
+ *
  * Collection: chat_fabric__v2
- * Vectors:    512-dim Voyage AI voyage-3-lite, Cosine distance
+ * Vectors:    512-dim Voyage AI (or 768-dim Ollama nomic-embed-text), Cosine distance
  */
 export declare const COLLECTION = "chat_fabric__v2";
 export declare let EMBEDDING_DIMS: number;

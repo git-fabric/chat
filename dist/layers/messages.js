@@ -18,13 +18,71 @@ import { createOllamaConfig, ollamaCompleteStream } from "../adapters/ollama.js"
 const MOE_ROUTES = [
     { app: "unifi", service: "fabric-unifi", port: 8200, priority: 100, keywords: ["unifi", "wifi", "wireless", "ssid", "access point", "ubiquiti", "vlan", "ap "] },
     { app: "proxmox", service: "fabric-proxmox", port: 8200, priority: 100, keywords: ["proxmox", "pve", "vm", "virtual machine", "lxc", "hypervisor", "qemu"] },
-    { app: "k8s", service: "fabric-k8s", port: 8200, priority: 100, keywords: ["kubernetes", "k8s", "k3s", "pod", "deployment", "namespace", "kubectl", "ingress", "helm", "statefulset"] },
+    { app: "k8s", service: "fabric-k8s", port: 8200, priority: 100, keywords: ["kubernetes", "k8s", "k3s", "pod", "deployment", "namespace", "kubectl", "ingress", "helm", "statefulset", "argocd", "longhorn"] },
     { app: "cloudflare", service: "fabric-cloudflare", port: 8200, priority: 90, keywords: ["cloudflare", "dns record", "zone", "cname", "cache purge", "worker", "tunnel"] },
     { app: "tailscale", service: "fabric-tailscale", port: 8200, priority: 90, keywords: ["tailscale", "vpn", "tailnet", "exit node", "subnet router", "magic dns"] },
     { app: "cve", service: "fabric-cve", port: 8200, priority: 90, keywords: ["cve", "vulnerability", "vuln", "patch", "security scan", "advisory", "exploit"] },
     { app: "sandfly", service: "fabric-sandfly", port: 8200, priority: 90, keywords: ["sandfly", "intrusion", "threat", "malware", "rootkit", "ioc"] },
     { app: "git", service: "fabric-git", port: 8200, priority: 80, keywords: ["git repo", "commit", "branch", "pull request", "pr ", "merge", "release"] },
 ];
+/** Canonical name aliases — maps user-facing names to internal app keys */
+const APP_ALIASES = {
+    // Direct matches
+    unifi: "unifi",
+    proxmox: "proxmox",
+    kubernetes: "k8s",
+    k8s: "k8s",
+    k3s: "k8s",
+    cloudflare: "cloudflare",
+    tailscale: "tailscale",
+    cve: "cve",
+    sandfly: "sandfly",
+    git: "git",
+    // Sub-services that map to parent fabric apps
+    argocd: "k8s",
+    argo: "k8s",
+    longhorn: "k8s",
+    traefik: "k8s",
+    rancher: "k8s",
+    ceph: "proxmox",
+    pve: "proxmox",
+    // Network sub-services
+    wifi: "unifi",
+    wireless: "unifi",
+    dns: "cloudflare",
+    vpn: "tailscale",
+    tailnet: "tailscale",
+};
+function parseServiceQuery(message) {
+    const trimmed = message.trim().toLowerCase();
+    // Match: "inspect <name>", "service <name>", "map <name>", or bare "<name>"
+    let mode = "overview";
+    let serviceName = trimmed;
+    const inspectMatch = trimmed.match(/^inspect\s+(.+)$/);
+    const serviceMatch = trimmed.match(/^service\s+(.+)$/);
+    const mapMatch = trimmed.match(/^map\s+(.+)$/);
+    if (inspectMatch) {
+        mode = "inspect";
+        serviceName = inspectMatch[1].trim();
+    }
+    else if (serviceMatch) {
+        mode = "overview";
+        serviceName = serviceMatch[1].trim();
+    }
+    else if (mapMatch) {
+        mode = "map";
+        serviceName = mapMatch[1].trim();
+    }
+    // Look up the canonical app name
+    const app = APP_ALIASES[serviceName];
+    if (!app)
+        return null;
+    // Find the matching route
+    const route = MOE_ROUTES.find((r) => r.app === app);
+    if (!route)
+        return null;
+    return { mode, app, route, originalMessage: message };
+}
 function detectFabricApp(message) {
     const lower = message.toLowerCase();
     let best = null;
@@ -72,6 +130,57 @@ const SUMMARY_TOOLS = {
     cve: [{ tool: "cve_queue_stats", key: "stats" }],
     sandfly: [{ tool: "sandfly_get_alerts", key: "alerts" }],
     git: [{ tool: "git_repo_list", key: "repos" }],
+};
+/** Deep inspection tools — fetches ALL available telemetry for a service */
+const INSPECT_TOOLS = {
+    unifi: [
+        { tool: "unifi_network_status", key: "status" },
+        { tool: "unifi_list_devices", key: "devices" },
+        { tool: "unifi_list_sites", key: "sites" },
+    ],
+    proxmox: [
+        { tool: "pve_cluster_status", key: "cluster" },
+        { tool: "pve_list_vms", args: { node: "pve01" }, key: "vms" },
+        { tool: "pve_list_containers", args: { node: "pve01" }, key: "containers" },
+        { tool: "pve_list_storage", key: "storage" },
+        { tool: "pve_list_tasks", key: "tasks" },
+    ],
+    k8s: [
+        { tool: "k8s_cluster_info", key: "cluster" },
+        { tool: "k8s_list_nodes", key: "nodes" },
+        { tool: "k8s_list_pods", args: {}, key: "pods" },
+        { tool: "k8s_list_deployments", key: "deployments" },
+        { tool: "k8s_list_events", key: "events" },
+        { tool: "k8s_list_pvcs", key: "pvcs" },
+        { tool: "k8s_list_argocd_apps", key: "argocd" },
+        { tool: "k8s_list_longhorn_volumes", key: "longhorn" },
+        { tool: "k8s_list_ingress_routes", key: "ingress" },
+        { tool: "k8s_pod_problems", key: "problems" },
+    ],
+    cloudflare: [
+        { tool: "cf_list_zones", key: "zones" },
+        { tool: "cf_list_dns_records", key: "records" },
+        { tool: "cf_zone_analytics", key: "analytics" },
+    ],
+    tailscale: [
+        { tool: "ts_health", key: "health" },
+        { tool: "ts_list_devices", key: "devices" },
+        { tool: "ts_get_dns", key: "dns" },
+        { tool: "ts_get_acl", key: "acl" },
+    ],
+    cve: [
+        { tool: "cve_queue_stats", key: "stats" },
+    ],
+    sandfly: [
+        { tool: "sandfly_get_alerts", key: "alerts" },
+        { tool: "sandfly_list_hosts", key: "hosts" },
+        { tool: "sandfly_get_results", key: "results" },
+    ],
+    git: [
+        { tool: "git_repo_list", key: "repos" },
+        { tool: "git_pr_list", key: "prs" },
+        { tool: "git_commit_list", key: "commits" },
+    ],
 };
 /** Specific query patterns → tool mappings for targeted questions */
 const SPECIFIC_QUERIES = [
@@ -295,6 +404,571 @@ const FORMATTERS = {
     tailscale: formatTailscale,
     cloudflare: formatCloudflare,
 };
+const SERVICE_META = {
+    unifi: {
+        name: "UniFi Network",
+        purpose: "Centralized network management — switches, APs, security gateway",
+        role: "Core network fabric — manages all VLANs, wireless, and L2/L3 switching",
+        criticality: "Critical",
+        deploymentType: "Hardware appliance (UDM Pro) + managed switches + APs",
+        hostNode: "UDM Pro (standalone)",
+        networkDeps: "Management VLAN, upstream ISP",
+        storageDeps: "UDM Pro internal storage",
+        relatedServices: ["Tailscale", "Cloudflare", "Proxmox", "Kubernetes"],
+        authMethod: "Local admin + UniFi Cloud SSO",
+        exposureSurface: "Management UI (HTTPS), SSH to devices",
+        knownRisks: ["Firmware update failures", "AP adoption issues", "VLAN misconfiguration"],
+        securityIntegrations: ["Tailscale (VPN bypass)", "Cloudflare (DNS)"],
+        monitoring: "UniFi built-in dashboard",
+        logging: "UniFi event log, syslog",
+        operationalCommands: [
+            "unifi_network_status — full network overview",
+            "unifi_list_devices — all managed devices",
+            "unifi_list_sites — site list",
+        ],
+        commonFailures: [
+            "AP offline → check PoE port, power cycle switch port",
+            "Client can't connect → check VLAN assignment, RADIUS",
+            "Firmware stuck → SSH to device, manual upgrade",
+        ],
+        recommendations: [
+            "Enable auto-backup on UDM Pro",
+            "Set firmware auto-update to stable channel only",
+            "Monitor AP channel utilization for DFS interference",
+            "Add SNMP polling for switch port utilization",
+        ],
+        upstreamDeps: ["ISP", "Power/PoE"],
+        downstreamDeps: ["All networked services", "Tailscale", "DNS"],
+    },
+    proxmox: {
+        name: "Proxmox VE",
+        purpose: "Type-1 hypervisor — VM and LXC container management",
+        role: "Compute foundation — hosts all VMs and containers for the homelab",
+        criticality: "Critical",
+        deploymentType: "Bare-metal cluster",
+        hostNode: "pve01 (physical server)",
+        networkDeps: "Management VLAN, storage network",
+        storageDeps: "Local ZFS, NFS, Ceph (if configured)",
+        relatedServices: ["Kubernetes (k3s VMs)", "UniFi", "Tailscale"],
+        authMethod: "PAM / PVE local auth",
+        exposureSurface: "Web UI (8006), SSH, SPICE console",
+        knownRisks: ["Storage pool full", "HA failover misconfiguration", "Kernel panic on host"],
+        securityIntegrations: ["Tailscale (remote access)", "Sandfly (host intrusion)"],
+        monitoring: "Proxmox built-in metrics, node exporter",
+        logging: "journald, pveproxy logs",
+        operationalCommands: [
+            "pve_cluster_status — cluster health + node status",
+            "pve_list_vms — all VMs with CPU/RAM metrics",
+            "pve_list_containers — LXC containers",
+            "pve_list_storage — storage pools + usage",
+            "pve_list_tasks — recent task log",
+        ],
+        commonFailures: [
+            "VM won't start → check storage availability, disk locks",
+            "Cluster quorum lost → check corosync, network between nodes",
+            "Storage full → check ZFS pool, thin provisioning",
+            "High CPU → identify runaway VM, check iowait",
+        ],
+        recommendations: [
+            "Schedule regular vzdump backups to offsite",
+            "Set up email alerts for storage thresholds (80%+)",
+            "Keep kernel and packages updated monthly",
+            "Monitor disk SMART data for early failure detection",
+            "Enable HA for critical VMs",
+        ],
+        upstreamDeps: ["Power", "Network (UniFi)", "Storage (local/NFS)"],
+        downstreamDeps: ["Kubernetes nodes", "All hosted VMs", "LXC containers"],
+    },
+    k8s: {
+        name: "Kubernetes (k3s)",
+        purpose: "Container orchestration — workload scheduling and service mesh",
+        role: "Application platform — runs all containerized workloads via GitOps",
+        criticality: "Critical",
+        deploymentType: "k3s cluster on Proxmox VMs",
+        hostNode: "3 masters + 3 workers (Proxmox VMs)",
+        networkDeps: "Pod network (Flannel/Calico), Service CIDR, Ingress (Traefik)",
+        storageDeps: "Longhorn (distributed), host-path",
+        relatedServices: ["Proxmox (hosts)", "ArgoCD (GitOps)", "Longhorn (storage)", "Traefik (ingress)", "Cloudflare (DNS/tunnels)"],
+        authMethod: "kubeconfig, RBAC, ServiceAccounts",
+        exposureSurface: "API server (6443), Traefik ingress, NodePorts",
+        knownRisks: ["etcd quorum loss", "Longhorn volume degraded", "Pod eviction due to resource pressure"],
+        securityIntegrations: ["Tailscale (kubectl access)", "Cloudflare Tunnel (ingress)", "Sandfly (node scanning)"],
+        monitoring: "Prometheus + Grafana (if deployed)",
+        logging: "Pod logs via kubectl, Loki (if deployed)",
+        operationalCommands: [
+            "k8s_cluster_info — cluster version, node/pod counts",
+            "k8s_list_nodes — node status + resources",
+            "k8s_list_pods — all pods with status",
+            "k8s_pod_problems — pods in CrashLoopBackOff/Error",
+            "k8s_list_deployments — deployment rollout status",
+            "k8s_list_events — recent cluster events",
+            "k8s_list_argocd_apps — ArgoCD sync status",
+            "k8s_list_longhorn_volumes — storage volume health",
+            "k8s_list_ingress_routes — Traefik ingress routes",
+            "k8s_list_pvcs — persistent volume claims",
+        ],
+        commonFailures: [
+            "Pod CrashLoopBackOff → check logs, resource limits, image pull",
+            "Node NotReady → check kubelet, disk pressure, network",
+            "Longhorn volume degraded → check replica count, node storage",
+            "ArgoCD OutOfSync → check git repo, manual sync",
+            "Ingress 503 → check backend pods, service endpoints",
+        ],
+        recommendations: [
+            "Enable PodDisruptionBudgets for critical workloads",
+            "Set resource requests/limits on all deployments",
+            "Monitor Longhorn volume health and disk space",
+            "Use ArgoCD auto-sync with self-heal for GitOps consistency",
+            "Regular etcd snapshots (k3s does this automatically)",
+        ],
+        upstreamDeps: ["Proxmox (VM hosts)", "Network (UniFi)", "DNS (Cloudflare)"],
+        downstreamDeps: ["All containerized apps", "fabric-* services", "Ingress routes"],
+    },
+    cloudflare: {
+        name: "Cloudflare",
+        purpose: "DNS management, CDN, tunnels, and edge security",
+        role: "Edge layer — DNS resolution, TLS termination, DDoS protection",
+        criticality: "High",
+        deploymentType: "External SaaS + cloudflared tunnel agent",
+        hostNode: "Cloudflare edge (global) + tunnel pod in k3s",
+        networkDeps: "Public internet, tunnel to k3s ingress",
+        storageDeps: "None (stateless edge)",
+        relatedServices: ["Kubernetes (tunnel target)", "Tailscale (internal DNS)", "UniFi (network)"],
+        authMethod: "API token, Cloudflare dashboard SSO",
+        exposureSurface: "Public DNS records, tunnel endpoints",
+        knownRisks: ["DNS propagation delays", "Tunnel disconnection", "Rate limiting"],
+        securityIntegrations: ["WAF rules", "DDoS protection", "Access policies"],
+        monitoring: "Cloudflare analytics dashboard",
+        logging: "Cloudflare edge logs",
+        operationalCommands: [
+            "cf_list_zones — DNS zones and status",
+            "cf_list_dns_records — all DNS records",
+            "cf_zone_analytics — traffic and performance",
+        ],
+        commonFailures: [
+            "DNS not resolving → check record TTL, propagation",
+            "Tunnel offline → check cloudflared pod, network",
+            "SSL error → check origin certificate, encryption mode",
+        ],
+        recommendations: [
+            "Enable DNSSEC on all zones",
+            "Use Cloudflare Tunnel instead of port forwarding",
+            "Set up page rules for caching static assets",
+            "Monitor tunnel health with alerts",
+        ],
+        upstreamDeps: ["Internet", "Domain registrar"],
+        downstreamDeps: ["All public-facing services", "DNS resolution"],
+    },
+    tailscale: {
+        name: "Tailscale",
+        purpose: "Zero-config VPN mesh — secure remote access and site connectivity",
+        role: "Overlay network — connects all devices across locations via WireGuard",
+        criticality: "High",
+        deploymentType: "Agent on each device + Tailscale coordination server (SaaS)",
+        hostNode: "Agents on: Proxmox hosts, k3s nodes, workstations, mobile",
+        networkDeps: "Internet (for coordination), UDP 41641 (direct/DERP relay)",
+        storageDeps: "None (stateless client)",
+        relatedServices: ["UniFi (subnet routes)", "Proxmox (remote access)", "Kubernetes (kubectl)"],
+        authMethod: "SSO (GitHub/Google/OIDC), pre-auth keys for servers",
+        exposureSurface: "Tailscale IP space (100.x.x.x), shared nodes",
+        knownRisks: ["Key expiry", "Subnet route conflicts", "DERP relay latency"],
+        securityIntegrations: ["ACL policies", "MFA via SSO", "Audit logs"],
+        monitoring: "Tailscale admin console",
+        logging: "Tailscale event logs",
+        operationalCommands: [
+            "ts_health — overall tailnet health",
+            "ts_list_devices — all connected devices",
+            "ts_get_dns — DNS configuration",
+            "ts_get_acl — access control policies",
+        ],
+        commonFailures: [
+            "Device offline → check tailscaled service, auth key expiry",
+            "Subnet route unreachable → check advertising node, ACLs",
+            "Slow connection → check DERP relay, direct connection status",
+        ],
+        recommendations: [
+            "Enable auto-approve for subnet routes",
+            "Set up exit nodes for remote browsing",
+            "Use pre-auth keys with tags for server automation",
+            "Audit ACLs quarterly",
+        ],
+        upstreamDeps: ["Internet", "SSO provider"],
+        downstreamDeps: ["Remote access to all services", "kubectl", "SSH"],
+    },
+    cve: {
+        name: "CVE Scanner",
+        purpose: "Vulnerability tracking and advisory monitoring",
+        role: "Security intelligence — tracks CVEs relevant to deployed software",
+        criticality: "Medium",
+        deploymentType: "Kubernetes pod (fabric-cve)",
+        hostNode: "k3s cluster",
+        networkDeps: "Internet (NVD/MITRE feeds), cluster network",
+        storageDeps: "Qdrant (vector store for advisory search)",
+        relatedServices: ["Sandfly (threat detection)", "Kubernetes (scanned workloads)"],
+        authMethod: "MCP tool access via fabric gateway",
+        exposureSurface: "Internal MCP endpoint only",
+        knownRisks: ["Stale CVE data if feeds unavailable", "False positives"],
+        securityIntegrations: ["NVD feed", "MITRE ATT&CK"],
+        monitoring: "Queue stats via cve_queue_stats",
+        logging: "Pod logs",
+        operationalCommands: ["cve_queue_stats — vulnerability queue metrics"],
+        commonFailures: [
+            "Feed sync failure → check internet, NVD API limits",
+            "Queue backlog → check processing pipeline",
+        ],
+        recommendations: [
+            "Set up daily CVE feed sync",
+            "Prioritize CVEs by CVSS score and deployed software",
+            "Integrate with patch management workflow",
+        ],
+        upstreamDeps: ["Internet (NVD feeds)", "Kubernetes"],
+        downstreamDeps: ["Alert pipeline", "Patch management"],
+    },
+    sandfly: {
+        name: "Sandfly Security",
+        purpose: "Agentless Linux intrusion detection and compromise assessment",
+        role: "Host security — scans all Linux hosts for threats, rootkits, and anomalies",
+        criticality: "High",
+        deploymentType: "Server + agents (or agentless SSH scanning)",
+        hostNode: "Dedicated VM or k3s pod",
+        networkDeps: "SSH access to all scanned hosts",
+        storageDeps: "Local database for scan results",
+        relatedServices: ["Proxmox (scanned hosts)", "Kubernetes (scanned nodes)", "CVE (vulnerability correlation)"],
+        authMethod: "API key, web UI authentication",
+        exposureSurface: "Web UI, API endpoint",
+        knownRisks: ["SSH key compromise", "Scan resource overhead", "Alert fatigue"],
+        securityIntegrations: ["Tailscale (secure scan path)", "CVE scanner"],
+        monitoring: "Sandfly dashboard, alert stream",
+        logging: "Scan results, audit log",
+        operationalCommands: [
+            "sandfly_get_alerts — active security alerts",
+            "sandfly_list_hosts — scanned host inventory",
+            "sandfly_get_results — detailed scan results",
+        ],
+        commonFailures: [
+            "Scan failed → check SSH connectivity, key permissions",
+            "High alert volume → tune scan policies, whitelist known good",
+            "Agent offline → check sandfly-node service",
+        ],
+        recommendations: [
+            "Schedule scans during low-usage windows",
+            "Review and tune alert thresholds monthly",
+            "Ensure all hosts are in scan inventory",
+            "Correlate Sandfly alerts with CVE data",
+        ],
+        upstreamDeps: ["SSH access", "Network (UniFi)"],
+        downstreamDeps: ["Alert pipeline", "Incident response"],
+    },
+    git: {
+        name: "Git (Gitea/Forgejo)",
+        purpose: "Self-hosted Git repository management",
+        role: "Source of truth — stores all infrastructure-as-code and application repos",
+        criticality: "High",
+        deploymentType: "Kubernetes pod (fabric-git)",
+        hostNode: "k3s cluster",
+        networkDeps: "Cluster network, ingress for web UI",
+        storageDeps: "Longhorn PVC for repository data",
+        relatedServices: ["ArgoCD (GitOps sync)", "Kubernetes (deployment target)", "Cloudflare (DNS)"],
+        authMethod: "Local accounts, SSH keys, OAuth",
+        exposureSurface: "Web UI (HTTPS), SSH (Git), API",
+        knownRisks: ["Repository corruption", "Disk full", "Webhook failures"],
+        securityIntegrations: ["SSH key management", "Access control per repo"],
+        monitoring: "Health endpoint, pod metrics",
+        logging: "Application logs, access logs",
+        operationalCommands: [
+            "git_repo_list — all repositories",
+            "git_pr_list — open pull requests",
+            "git_commit_list — recent commits",
+        ],
+        commonFailures: [
+            "Push rejected → check disk space, repo permissions",
+            "Webhook timeout → check target service, network",
+            "ArgoCD out of sync → check webhook, polling interval",
+        ],
+        recommendations: [
+            "Enable repository mirroring to offsite backup",
+            "Set up branch protection on main branches",
+            "Monitor PVC usage for repository growth",
+            "Configure webhook retries for ArgoCD",
+        ],
+        upstreamDeps: ["Kubernetes", "Storage (Longhorn)", "DNS"],
+        downstreamDeps: ["ArgoCD", "CI/CD pipelines", "All deployed applications"],
+    },
+};
+// ── Service dependency map (for "map" mode) ──────────────────────────────────
+const SERVICE_TREE = {
+    unifi: {
+        label: "UniFi Network",
+        children: [
+            { label: "VLANs", children: [{ label: "Management" }, { label: "IoT" }, { label: "Guest" }] },
+            { label: "Switches (L2/L3)" },
+            { label: "Access Points" },
+            { label: "UDM Pro (Gateway)" },
+            { label: "Tailscale (overlay)" },
+            { label: "Cloudflare (DNS)" },
+        ],
+    },
+    proxmox: {
+        label: "Proxmox VE",
+        children: [
+            { label: "k3s Cluster", children: [
+                    { label: "Longhorn (storage)" },
+                    { label: "ArgoCD (GitOps)" },
+                    { label: "Traefik (ingress)" },
+                    { label: "fabric-* pods" },
+                ] },
+            { label: "Standalone VMs" },
+            { label: "LXC Containers" },
+            { label: "ZFS Storage" },
+        ],
+    },
+    k8s: {
+        label: "Kubernetes (k3s)",
+        children: [
+            { label: "Control Plane", children: [
+                    { label: "k3s-master01" },
+                    { label: "k3s-master02" },
+                ] },
+            { label: "Workers", children: [
+                    { label: "k3s-worker01" },
+                    { label: "k3s-worker02" },
+                    { label: "k3s-worker03" },
+                ] },
+            { label: "Longhorn (storage)" },
+            { label: "ArgoCD (GitOps)" },
+            { label: "Traefik (ingress)" },
+            { label: "Cloudflare Tunnel" },
+        ],
+    },
+    cloudflare: {
+        label: "Cloudflare",
+        children: [
+            { label: "DNS Zones" },
+            { label: "Tunnels → k3s Ingress" },
+            { label: "WAF / DDoS Protection" },
+            { label: "SSL/TLS Termination" },
+        ],
+    },
+    tailscale: {
+        label: "Tailscale VPN",
+        children: [
+            { label: "Proxmox Hosts" },
+            { label: "k3s Nodes" },
+            { label: "Workstations" },
+            { label: "Mobile Devices" },
+            { label: "Subnet Routes → VLANs" },
+            { label: "Exit Nodes" },
+        ],
+    },
+    cve: {
+        label: "CVE Scanner",
+        children: [
+            { label: "NVD Feed Sync" },
+            { label: "Vulnerability Queue" },
+            { label: "Sandfly (correlation)" },
+        ],
+    },
+    sandfly: {
+        label: "Sandfly Security",
+        children: [
+            { label: "Proxmox Hosts (scanned)" },
+            { label: "k3s Nodes (scanned)" },
+            { label: "Alert Pipeline" },
+            { label: "CVE Correlation" },
+        ],
+    },
+    git: {
+        label: "Git (Forgejo)",
+        children: [
+            { label: "Repositories" },
+            { label: "ArgoCD Webhooks" },
+            { label: "Pull Requests" },
+            { label: "Longhorn PVC (data)" },
+        ],
+    },
+};
+/** Render a tree as ASCII art */
+function renderTree(node, prefix = "", isLast = true) {
+    const connector = isLast ? "└── " : "├── ";
+    const lines = [prefix + (prefix ? connector : "") + node.label];
+    const childPrefix = prefix + (prefix ? (isLast ? "    " : "│   ") : "");
+    if (node.children) {
+        for (let i = 0; i < node.children.length; i++) {
+            const child = node.children[i];
+            const childIsLast = i === node.children.length - 1;
+            const childConnector = childIsLast ? "└── " : "├── ";
+            lines.push(childPrefix + childConnector + child.label);
+            if (child.children) {
+                const grandChildPrefix = childPrefix + (childIsLast ? "    " : "│   ");
+                for (let j = 0; j < child.children.length; j++) {
+                    const gc = child.children[j];
+                    const gcConnector = j === child.children.length - 1 ? "└── " : "├── ";
+                    lines.push(grandChildPrefix + gcConnector + gc.label);
+                }
+            }
+        }
+    }
+    return lines.join("\n");
+}
+// ── Structured briefing formatter ────────────────────────────────────────────
+function formatServiceBriefing(app, data, mode) {
+    const meta = SERVICE_META[app];
+    if (!meta)
+        return formatGeneric(app, data);
+    if (mode === "map") {
+        const tree = SERVICE_TREE[app];
+        if (!tree)
+            return `No dependency map available for ${app}.`;
+        const lines = [
+            `# ${meta.name} — Architecture Map`,
+            "",
+            "```",
+            renderTree(tree),
+            "```",
+            "",
+            "## Upstream Dependencies",
+            ...meta.upstreamDeps.map((d) => `- ${d}`),
+            "",
+            "## Downstream Dependencies",
+            ...meta.downstreamDeps.map((d) => `- ${d}`),
+            "",
+            "## Related Services",
+            ...meta.relatedServices.map((s) => `- ${s}`),
+        ];
+        return lines.join("\n");
+    }
+    // ── Overview / Inspect mode ────────────────────────────────────────────────
+    const lines = [];
+    // SERVICE OVERVIEW
+    lines.push("# SERVICE OVERVIEW", "", `**Name:** ${meta.name}`, `**Purpose:** ${meta.purpose}`, `**Role in Homelab:** ${meta.role}`, `**Criticality Level:** ${meta.criticality}`);
+    // ARCHITECTURE
+    lines.push("", "---", "", "# ARCHITECTURE", "", `**Deployment Type:** ${meta.deploymentType}`, `**Host / Node Location:** ${meta.hostNode}`, `**Network Dependencies:** ${meta.networkDeps}`, `**Storage Dependencies:** ${meta.storageDeps}`, "", "**Related Services:**", ...meta.relatedServices.map((s) => `- ${s}`));
+    // CURRENT STATUS (from live data)
+    lines.push("", "---", "", "# CURRENT STATUS", "");
+    const statusFormatter = FORMATTERS[app];
+    if (statusFormatter) {
+        lines.push(statusFormatter(data));
+    }
+    else {
+        lines.push(formatGeneric(app, data));
+    }
+    // RESOURCE UTILIZATION (extract from live data where available)
+    const resources = extractResources(app, data);
+    if (resources) {
+        lines.push("", "---", "", "# RESOURCE UTILIZATION", "", resources);
+    }
+    // SECURITY POSTURE
+    lines.push("", "---", "", "# SECURITY POSTURE", "", `**Authentication:** ${meta.authMethod}`, `**Exposure Surface:** ${meta.exposureSurface}`, "", "**Known Risks:**", ...meta.knownRisks.map((r) => `- ${r}`), "", "**Security Integrations:**", ...meta.securityIntegrations.map((s) => `- ${s}`));
+    // OBSERVABILITY
+    lines.push("", "---", "", "# OBSERVABILITY", "", `**Monitoring:** ${meta.monitoring}`, `**Logging:** ${meta.logging}`);
+    // Inspect mode: add events/tasks if available
+    if (mode === "inspect") {
+        const events = extractRecentEvents(app, data);
+        if (events) {
+            lines.push("", "---", "", "# RECENT EVENTS", "", events);
+        }
+    }
+    // DEPENDENCIES
+    lines.push("", "---", "", "# DEPENDENCIES", "", "**Upstream:**", ...meta.upstreamDeps.map((d) => `- ${d}`), "", "**Downstream:**", ...meta.downstreamDeps.map((d) => `- ${d}`));
+    // OPERATIONAL COMMANDS
+    lines.push("", "---", "", "# OPERATIONAL COMMANDS", "", ...meta.operationalCommands.map((c) => `- \`${c.split(" — ")[0]}\` — ${c.split(" — ")[1] ?? ""}`));
+    // COMMON FAILURE MODES
+    lines.push("", "---", "", "# COMMON FAILURE MODES", "", ...meta.commonFailures.map((f) => `- ${f}`));
+    // RECOMMENDATIONS
+    lines.push("", "---", "", "# RECOMMENDATIONS", "", ...meta.recommendations.map((r, i) => `${i + 1}. ${r}`));
+    return lines.join("\n");
+}
+/** Extract resource utilization from live data */
+function extractResources(app, data) {
+    if (app === "proxmox") {
+        const cluster = data.cluster;
+        if (!Array.isArray(cluster))
+            return null;
+        const nodes = cluster.filter((r) => r.type === "node");
+        if (nodes.length === 0)
+            return null;
+        const lines = [];
+        for (const n of nodes) {
+            const cpuPct = n.cpu != null ? `${(Number(n.cpu) * 100).toFixed(1)}%` : "?";
+            const memUsed = n.mem != null ? fmtBytes(Number(n.mem)) : "?";
+            const memTotal = n.maxmem != null ? fmtBytes(Number(n.maxmem)) : "?";
+            const memPct = n.mem != null && n.maxmem ? `${((Number(n.mem) / Number(n.maxmem)) * 100).toFixed(0)}%` : "";
+            lines.push(`**${n.node}:** CPU ${cpuPct} | RAM ${memUsed}/${memTotal} (${memPct})`);
+        }
+        return lines.join("\n");
+    }
+    if (app === "k8s") {
+        const cluster = data.cluster;
+        if (!cluster)
+            return null;
+        return [
+            `**Nodes:** ${cluster.nodeCount ?? "?"}`,
+            `**Pods:** ${cluster.podCount ?? "?"} across ${cluster.namespaceCount ?? "?"} namespaces`,
+        ].join("\n");
+    }
+    if (app === "unifi") {
+        const inner = (data.status ?? data);
+        const summary = inner.summary;
+        if (!summary)
+            return null;
+        const devSummary = summary.devices;
+        return [
+            `**Devices:** ${devSummary?.total ?? "?"} total, ${devSummary?.online ?? "?"} online, ${devSummary?.offline ?? "?"} offline`,
+            `**Hosts:** ${summary.hosts ?? "?"}`,
+        ].join("\n");
+    }
+    return null;
+}
+/** Extract recent events from inspect data */
+function extractRecentEvents(app, data) {
+    // K8s events
+    if (app === "k8s" && data.events) {
+        const events = Array.isArray(data.events) ? data.events : data.events.events;
+        if (!Array.isArray(events) || events.length === 0)
+            return "No recent events.";
+        const lines = [];
+        for (const e of events.slice(0, 15)) {
+            const type = e.type === "Warning" ? "⚠️" : "ℹ️";
+            lines.push(`${type} **${e.reason ?? "?"}** — ${e.message ?? "?"} (${e.namespace ?? "?"}/${e.object ?? "?"})`);
+        }
+        return lines.join("\n");
+    }
+    // K8s pod problems
+    if (app === "k8s" && data.problems) {
+        const problems = Array.isArray(data.problems) ? data.problems : [];
+        if (problems.length === 0)
+            return "No pod problems detected.";
+        const lines = [];
+        for (const p of problems.slice(0, 10)) {
+            lines.push(`🔴 **${p.name ?? "?"}** (${p.namespace ?? "?"}) — ${p.status ?? "?"}: ${p.reason ?? "?"}`);
+        }
+        return lines.join("\n");
+    }
+    // Proxmox tasks
+    if (app === "proxmox" && data.tasks) {
+        const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+        if (tasks.length === 0)
+            return "No recent tasks.";
+        const lines = [];
+        for (const t of tasks.slice(0, 10)) {
+            const status = t.status === "OK" ? "✅" : "🔴";
+            lines.push(`${status} **${t.type ?? "?"}** on ${t.node ?? "?"} — ${t.status ?? "?"}`);
+        }
+        return lines.join("\n");
+    }
+    // Sandfly alerts
+    if (app === "sandfly" && data.alerts) {
+        const alerts = Array.isArray(data.alerts) ? data.alerts : [];
+        if (alerts.length === 0)
+            return "No active alerts.";
+        const lines = [];
+        for (const a of alerts.slice(0, 10)) {
+            lines.push(`⚠️ **${a.name ?? a.sandfly ?? "?"}** — ${a.severity ?? "?"} on ${a.host ?? "?"}`);
+        }
+        return lines.join("\n");
+    }
+    return null;
+}
 /** Fetch one tool from a fabric app */
 async function callFabricTool(baseUrl, tool, args) {
     const res = await fetch(`${baseUrl}/tools/call`, {
@@ -307,10 +981,22 @@ async function callFabricTool(baseUrl, tool, args) {
         return null;
     return res.json();
 }
-/** Fetch live data from a fabric app, pre-format into a readable report */
-async function fetchFabricSummary(service, port, app, message) {
+/** Fetch live data from a fabric app, pre-format into a readable report.
+ *  When mode is provided, uses the service intelligence briefing format. */
+async function fetchFabricSummary(service, port, app, message, mode) {
     const baseUrl = `http://${service}.fabric-sdk:${port}`;
-    const toolSpecs = selectTools(app, message);
+    // Select tool set based on mode
+    let toolSpecs;
+    if (mode === "inspect") {
+        toolSpecs = INSPECT_TOOLS[app] ?? selectTools(app, message);
+    }
+    else if (mode === "overview" || mode === "map") {
+        // Overview and map modes use the same data as overview (+ static metadata)
+        toolSpecs = SUMMARY_TOOLS[app] ?? [{ tool: `${app}_health`, args: {}, key: "result" }];
+    }
+    else {
+        toolSpecs = selectTools(app, message);
+    }
     try {
         // Fetch all tools in parallel
         const results = await Promise.all(toolSpecs.map(async (spec) => {
@@ -330,6 +1016,11 @@ async function fetchFabricSummary(service, port, app, message) {
             }
             data = merged;
         }
+        // Service intelligence briefing format for overview/inspect/map modes
+        if (mode) {
+            return formatServiceBriefing(app, data, mode);
+        }
+        // Legacy simple format for non-service queries
         const formatter = FORMATTERS[app];
         if (formatter)
             return formatter(data);
@@ -338,6 +1029,13 @@ async function fetchFabricSummary(service, port, app, message) {
     catch {
         return null;
     }
+}
+// ── History → CompletionMessage[] helper ──────────────────────────────────────
+function historyToCompletionMessages(history) {
+    return history.map((m) => ({
+        role: m.role,
+        content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+    }));
 }
 // ── Anthropic tool conversion ─────────────────────────────────────────────────
 function fabricToolToAnthropic(tool) {
@@ -414,11 +1112,24 @@ export async function sendMessage(adapter, sessionId, content, maxTokens = 8192)
     const isOllama = !!process.env.OLLAMA_ENDPOINT;
     const hasFabricGateway = typeof adapter.listFabricTools === "function" &&
         typeof adapter.callFabricTool === "function";
+    // ── Parse service intelligence query ────────────────────────────────────────
+    // Check for "service X", "inspect X", "map X", or bare service name triggers
+    const serviceQuery = parseServiceQuery(content);
     // ── Parallel: fetch session + pre-fetch fabric data simultaneously ────────
     // Only fetch last 20 messages for LLM context — no need to load entire history
     const sessionPromise = adapter.getSession(sessionId, 20);
-    const prefetchPromise = isOllama
-        ? (async () => {
+    const prefetchPromise = (async () => {
+        // Service intelligence query → always fetch with mode-specific tools
+        if (serviceQuery) {
+            try {
+                return await fetchFabricSummary(serviceQuery.route.service, serviceQuery.route.port, serviceQuery.app, content, serviceQuery.mode);
+            }
+            catch {
+                return null;
+            }
+        }
+        // Legacy Ollama pre-fetch for non-service queries
+        if (isOllama) {
             const detected = detectFabricApp(content);
             if (!detected)
                 return null;
@@ -428,14 +1139,16 @@ export async function sendMessage(adapter, sessionId, content, maxTokens = 8192)
             catch {
                 return null;
             }
-        })()
-        : Promise.resolve(null);
+        }
+        return null;
+    })();
     const [session, fabricContext] = await Promise.all([sessionPromise, prefetchPromise]);
     if (session.state === "archived") {
         throw new Error(`Session ${sessionId} is archived. Resume it or create a new session.`);
     }
     // ── Deterministic short-circuit: report without LLM ───────────────────────
-    if (fabricContext && !needsLlmReasoning(content)) {
+    // Service intelligence queries always short-circuit (the briefing IS the response)
+    if (fabricContext && (serviceQuery || !needsLlmReasoning(content))) {
         fireAndForget(async () => {
             const userMsg = await adapter.addMessage({ sessionId, role: "user", content });
             await adapter.embedAndStore(userMsg);
@@ -478,8 +1191,17 @@ export async function sendMessage(adapter, sessionId, content, maxTokens = 8192)
         await adapter.embedAndStore(userMsg);
     });
     // ── LLM completion (the only blocking step the user waits for) ────────────
+    //
+    // Routing logic:
+    //   1. Gateway + Claude  → full agentic tool_use loop (Claude calls tools natively)
+    //   2. Gateway + Ollama  → pre-fetch gateway tools, inject results as context for Ollama
+    //   3. No gateway        → straight to adapter.complete() (Ollama or Claude)
+    //
+    // This ensures Ollama sessions still get live infrastructure data via the gateway
+    // without requiring native tool_use protocol support.
     let result;
-    if (hasFabricGateway && !isOllama) {
+    if (hasFabricGateway && !isOllama && process.env.ANTHROPIC_API_KEY) {
+        // ── Path 1: Claude agentic loop (native tool_use) ─────────────────────
         let fabricTools = [];
         try {
             const allTools = await adapter.listFabricTools();
@@ -494,17 +1216,54 @@ export async function sendMessage(adapter, sessionId, content, maxTokens = 8192)
             result = await completeWithTools(anthropic, session.model, session.systemPrompt, history, fabricTools.map(fabricToolToAnthropic), (name, args) => adapter.callFabricTool(name, args), maxTokens);
         }
         else {
-            result = await adapter.complete(history.map((m) => ({
-                role: m.role,
-                content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-            })), { model: session.model, systemPrompt: session.systemPrompt, maxTokens });
+            result = await adapter.complete(historyToCompletionMessages(history), { model: session.model, systemPrompt: session.systemPrompt, maxTokens });
         }
     }
+    else if (hasFabricGateway && isOllama) {
+        // ── Path 2: Ollama + gateway — fetch tool data, inject as context ─────
+        // Ollama can't do native tool_use, but we can call the relevant tools
+        // ourselves and inject the results so the model has live data.
+        if (!fabricContext) {
+            // MoE pre-fetch didn't fire (no keyword match) — try gateway tools
+            let gatewayContext = null;
+            try {
+                const allTools = await adapter.listFabricTools();
+                // Use keyword-based selection from the tool names/descriptions
+                const relevant = allTools.filter((t) => {
+                    const lower = content.toLowerCase();
+                    const toolLower = (t.name + " " + t.description).toLowerCase();
+                    // Check if any significant words from the user query appear in the tool
+                    const queryWords = lower.split(/\s+/).filter((w) => w.length > 3);
+                    return queryWords.some((w) => toolLower.includes(w));
+                }).slice(0, 5);
+                if (relevant.length > 0) {
+                    const toolResults = await Promise.all(relevant.map(async (tool) => {
+                        try {
+                            const toolResult = await adapter.callFabricTool(tool.name, {});
+                            return `### ${tool.name}\n${JSON.stringify(toolResult, null, 2)}`;
+                        }
+                        catch {
+                            return null;
+                        }
+                    }));
+                    const validResults = toolResults.filter(Boolean);
+                    if (validResults.length > 0) {
+                        gatewayContext = `Use this live infrastructure data to inform your response:\n\n${validResults.join("\n\n")}`;
+                    }
+                }
+            }
+            catch {
+                // Gateway unreachable — proceed without extra context
+            }
+            if (gatewayContext) {
+                history.splice(history.length - 1, 0, { role: "user", content: gatewayContext });
+            }
+        }
+        result = await adapter.complete(historyToCompletionMessages(history), { model: session.model, systemPrompt: session.systemPrompt, maxTokens });
+    }
     else {
-        result = await adapter.complete(history.map((m) => ({
-            role: m.role,
-            content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-        })), { model: session.model, systemPrompt: session.systemPrompt, maxTokens });
+        // ── Path 3: No gateway — straight completion ──────────────────────────
+        result = await adapter.complete(historyToCompletionMessages(history), { model: session.model, systemPrompt: session.systemPrompt, maxTokens });
     }
     // ── Store assistant response — fire and forget ────────────────────────────
     fireAndForget(async () => {
@@ -538,9 +1297,19 @@ export async function* sendMessageStream(adapter, sessionId, content) {
         yield { done: true, inputTokens: result.inputTokens, outputTokens: result.outputTokens, model: result.model };
         return;
     }
+    // ── Parse service intelligence query ────────────────────────────────────────
+    const streamServiceQuery = parseServiceQuery(content);
     // ── Parallel: fetch session + pre-fetch fabric data ────────────────────────
     const sessionPromise = adapter.getSession(sessionId, 20);
     const prefetchPromise = (async () => {
+        if (streamServiceQuery) {
+            try {
+                return await fetchFabricSummary(streamServiceQuery.route.service, streamServiceQuery.route.port, streamServiceQuery.app, content, streamServiceQuery.mode);
+            }
+            catch {
+                return null;
+            }
+        }
         const detected = detectFabricApp(content);
         if (!detected)
             return null;
@@ -557,7 +1326,7 @@ export async function* sendMessageStream(adapter, sessionId, content) {
         return;
     }
     // ── Deterministic short-circuit: report without LLM ───────────────────────
-    if (fabricContext && !needsLlmReasoning(content)) {
+    if (fabricContext && (streamServiceQuery || !needsLlmReasoning(content))) {
         // Yield the entire report as one token — instant response
         yield { token: fabricContext };
         yield { done: true, inputTokens: 0, outputTokens: 0, model: "deterministic" };
