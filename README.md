@@ -14,7 +14,7 @@ This is the "conversation plane" of the fabric. It manages session state, messag
 2. **Local LLM** (confidence >= floor) — Ollama inference for routine completions (planned)
 3. **Claude** (default route, `0.0.0.0/0`) — complex completions requiring frontier-class reasoning
 
-> **Current state**: Completions route directly to Anthropic API (Claude). Local LLM routing via Ollama is planned but not yet implemented. The adapter interface is designed for this — `ChatAdapter.complete()` is the seam where routing will be added.
+> **Current state**: Completions route through Ollama (local LLM) when configured, with Claude as fallback. The fabric gateway enables agentic tool_use through either path. `ChatAdapter.complete()` is the routing seam.
 
 ## Tools
 
@@ -44,7 +44,7 @@ Layer 5 — Session        layers/sessions.ts (CRUD, fork, archive)
 Layer 4 — Transport      layers/messages.ts (send, context inject)
 Layer 3 — Network        Gateway registration (AS65004, fabric.chat.*)
 Layer 2 — Data Link      adapters/ (completion, embedding, vector store)
-Layer 1 — Physical       Qdrant Cloud, Anthropic API
+Layer 1 — Physical       Qdrant (local or cloud), Ollama, Anthropic API
 ```
 
 ### Gateway registration
@@ -55,9 +55,10 @@ Layer 1 — Physical       Qdrant Cloud, Anthropic API
 
 ### State storage
 
-- **Sessions + messages** — Qdrant Cloud collection `chat_fabric__messages__v1` (1536-dim)
-- **Semantic vectors** — Same Qdrant collection (text-embedding-3-small embeddings)
-- **Completions** — Anthropic API (claude-sonnet-4-6 default, configurable per session)
+- **Sessions + messages** — Qdrant collection `chat_fabric__v2` (512-dim Voyage AI, or 768-dim Ollama nomic-embed-text)
+- **Semantic vectors** — Same Qdrant collection (Cosine distance)
+- **Qdrant deployment** — Local/in-cluster (recommended) or Qdrant Cloud. Omit `QDRANT_API_KEY` for local no-auth mode
+- **Completions** — Ollama local LLM (primary) with Anthropic API fallback (configurable per session)
 
 ### Library
 
@@ -93,26 +94,27 @@ npx @git-fabric/chat start
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for completions (default route) |
-| `QDRANT_URL` | Yes | Qdrant instance URL (cloud or in-cluster) |
-| `QDRANT_API_KEY` | No | Qdrant API key (omit for in-cluster no-auth) |
+| `ANTHROPIC_API_KEY` | No* | Anthropic API key for Claude fallback route. *Required if OLLAMA_ENDPOINT is not set |
+| `QDRANT_URL` | Yes | Qdrant instance URL (`http://qdrant:6333` for local, or cloud URL) |
+| `QDRANT_API_KEY` | No | Qdrant API key — omit entirely for local/in-cluster no-auth mode |
+| `OLLAMA_ENDPOINT` | No | Ollama endpoint for local LLM routing (e.g. `http://ollama:11434`) |
+| `OLLAMA_MODEL` | No | Ollama model for completions (default: `qwen2.5-coder:3b`) |
+| `OLLAMA_EMBED_MODEL` | No | Ollama model for embeddings (default: `nomic-embed-text`, 768-dim) |
 | `FABRIC_GATEWAY_URL` | No | Gateway MCP endpoint for cross-fabric tool calls |
 | `MCP_HTTP_PORT` | No | HTTP server port (omit for stdio mode) |
 | `GATEWAY_URL` | No | Gateway registration endpoint |
 | `POD_IP` | No | Pod IP for gateway mcp_endpoint (default: 0.0.0.0) |
-| `OLLAMA_ENDPOINT` | No | Ollama endpoint for local LLM routing (planned) |
-| `OLLAMA_MODEL` | No | Ollama model for local inference (planned) |
 
-## Routing roadmap
+## Routing architecture
 
-The completion path currently goes straight to Anthropic. The target architecture:
+The completion path follows a three-lane model:
 
 ```
 chat_message_send
   → adapter.complete()
     → deterministic check (cached answers, FAQ)     — confidence >= 0.95
-    → local LLM (Ollama, qwen2.5-coder:3b)          — confidence >= floor
-    → Claude (Anthropic API)                         — default route (0.0.0.0/0)
+    → local LLM (Ollama, qwen2.5-coder or custom)    — confidence >= floor
+    → Claude (Anthropic API)                         — default route (0.0.0.0/0), last resort
 ```
 
 This matches the fabric-sdk BGP routing model: Claude is the route of last resort with lowest local preference. As the AIANA feedback loop indexes Claude's answers back into the knowledge base, the escalation rate to Claude trends toward zero.

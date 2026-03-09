@@ -7,8 +7,12 @@
  * Sessions and messages are both stored in a single collection with
  * a `_type` field discriminating them.
  *
+ * Supports both Qdrant Cloud (with API key) and local/in-cluster
+ * Qdrant (without authentication). When QDRANT_API_KEY is empty or
+ * unset, the api-key header is omitted entirely.
+ *
  * Collection: chat_fabric__v2
- * Vectors:    512-dim Voyage AI voyage-3-lite, Cosine distance
+ * Vectors:    512-dim Voyage AI (or 768-dim Ollama nomic-embed-text), Cosine distance
  */
 
 export const COLLECTION = "chat_fabric__v2";
@@ -16,6 +20,15 @@ export let EMBEDDING_DIMS = 512;
 
 export function setEmbeddingDims(dims: number): void {
   EMBEDDING_DIMS = dims;
+}
+
+// ── Header builder (omits api-key for local/in-cluster Qdrant) ───────────────
+
+function qdrantHeaders(qdrantKey: string, json = false): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (qdrantKey) headers["api-key"] = qdrantKey;
+  if (json) headers["Content-Type"] = "application/json";
+  return headers;
 }
 
 // ── Qdrant REST types ─────────────────────────────────────────────────────────
@@ -44,12 +57,12 @@ export async function ensureCollection(
   qdrantKey: string,
 ): Promise<void> {
   const url = `${qdrantUrl}/collections/${COLLECTION}`;
-  const checkRes = await fetch(url, { headers: { "api-key": qdrantKey } });
+  const checkRes = await fetch(url, { headers: qdrantHeaders(qdrantKey) });
   if (checkRes.ok) return;
 
   const createRes = await fetch(url, {
     method: "PUT",
-    headers: { "api-key": qdrantKey, "Content-Type": "application/json" },
+    headers: qdrantHeaders(qdrantKey, true),
     body: JSON.stringify({ vectors: { size: EMBEDDING_DIMS, distance: "Cosine" } }),
   });
   if (!createRes.ok) {
@@ -67,7 +80,7 @@ export async function upsertPoint(
 ): Promise<void> {
   const res = await fetch(`${qdrantUrl}/collections/${COLLECTION}/points`, {
     method: "PUT",
-    headers: { "api-key": qdrantKey, "Content-Type": "application/json" },
+    headers: qdrantHeaders(qdrantKey, true),
     body: JSON.stringify({ points: [point] }),
   });
   if (!res.ok) {
@@ -95,7 +108,7 @@ export async function setPayload(
 ): Promise<void> {
   const res = await fetch(`${qdrantUrl}/collections/${COLLECTION}/points/payload`, {
     method: "POST",
-    headers: { "api-key": qdrantKey, "Content-Type": "application/json" },
+    headers: qdrantHeaders(qdrantKey, true),
     body: JSON.stringify({ payload, points: [id] }),
   });
   if (!res.ok) {
@@ -111,7 +124,7 @@ export async function deleteByFilter(
 ): Promise<void> {
   const res = await fetch(`${qdrantUrl}/collections/${COLLECTION}/points/delete`, {
     method: "POST",
-    headers: { "api-key": qdrantKey, "Content-Type": "application/json" },
+    headers: qdrantHeaders(qdrantKey, true),
     body: JSON.stringify({ filter }),
   });
   if (!res.ok) {
@@ -127,7 +140,7 @@ export async function deleteById(
 ): Promise<void> {
   const res = await fetch(`${qdrantUrl}/collections/${COLLECTION}/points/delete`, {
     method: "POST",
-    headers: { "api-key": qdrantKey, "Content-Type": "application/json" },
+    headers: qdrantHeaders(qdrantKey, true),
     body: JSON.stringify({ points: [id] }),
   });
   if (!res.ok) {
@@ -150,7 +163,7 @@ export async function search(
 
   const res = await fetch(`${qdrantUrl}/collections/${COLLECTION}/points/search`, {
     method: "POST",
-    headers: { "api-key": qdrantKey, "Content-Type": "application/json" },
+    headers: qdrantHeaders(qdrantKey, true),
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -180,7 +193,7 @@ export async function scroll(
 
   const res = await fetch(`${qdrantUrl}/collections/${COLLECTION}/points/scroll`, {
     method: "POST",
-    headers: { "api-key": qdrantKey, "Content-Type": "application/json" },
+    headers: qdrantHeaders(qdrantKey, true),
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -199,7 +212,7 @@ export async function getPoint(
   id: string,
 ): Promise<Record<string, unknown> | null> {
   const res = await fetch(`${qdrantUrl}/collections/${COLLECTION}/points/${id}`, {
-    headers: { "api-key": qdrantKey },
+    headers: qdrantHeaders(qdrantKey),
   });
   if (res.status === 404) return null;
   if (!res.ok) {

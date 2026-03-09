@@ -388,6 +388,17 @@ async function fetchFabricSummary(
   }
 }
 
+// ── History → CompletionMessage[] helper ──────────────────────────────────────
+
+function historyToCompletionMessages(
+  history: Array<{ role: string; content: string | unknown }>,
+): CompletionMessage[] {
+  return history.map((m) => ({
+    role: m.role as "user" | "assistant",
+    content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+  }));
+}
+
 export interface SendResult {
   messageId: string;
   role: "assistant";
@@ -575,9 +586,19 @@ export async function sendMessage(
   });
 
   // ── LLM completion (the only blocking step the user waits for) ────────────
+  //
+  // Routing logic:
+  //   1. Gateway + Claude  → full agentic tool_use loop (Claude calls tools natively)
+  //   2. Gateway + Ollama  → pre-fetch gateway tools, inject results as context for Ollama
+  //   3. No gateway        → straight to adapter.complete() (Ollama or Claude)
+  //
+  // This ensures Ollama sessions still get live infrastructure data via the gateway
+  // without requiring native tool_use protocol support.
+
   let result: { content: string; inputTokens: number; outputTokens: number; routingLane?: RoutingLane };
 
-  if (hasFabricGateway && !isOllama) {
+  if (hasFabricGateway && !isOllama && process.env.ANTHROPIC_API_KEY) {
+    // ── Path 1: Claude agentic loop (native tool_use) ─────────────────────
     let fabricTools: FabricTool[] = [];
     try {
       const allTools = await adapter.listFabricTools!();
@@ -600,19 +621,61 @@ export async function sendMessage(
       );
     } else {
       result = await adapter.complete(
-        history.map((m) => ({
-          role: m.role as "user" | "assistant",
-          content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-        })) as CompletionMessage[],
+        historyToCompletionMessages(history),
         { model: session.model, systemPrompt: session.systemPrompt, maxTokens },
       );
     }
-  } else {
+  } else if (hasFabricGateway && isOllama) {
+    // ── Path 2: Ollama + gateway — fetch tool data, inject as context ─────
+    // Ollama can't do native tool_use, but we can call the relevant tools
+    // ourselves and inject the results so the model has live data.
+    if (!fabricContext) {
+      // MoE pre-fetch didn't fire (no keyword match) — try gateway tools
+      let gatewayContext: string | null = null;
+      try {
+        const allTools = await adapter.listFabricTools!();
+        // Use keyword-based selection from the tool names/descriptions
+        const relevant = allTools.filter((t) => {
+          const lower = content.toLowerCase();
+          const toolLower = (t.name + " " + t.description).toLowerCase();
+          // Check if any significant words from the user query appear in the tool
+          const queryWords = lower.split(/\s+/).filter((w) => w.length > 3);
+          return queryWords.some((w) => toolLower.includes(w));
+        }).slice(0, 5);
+
+        if (relevant.length > 0) {
+          const toolResults = await Promise.all(
+            relevant.map(async (tool) => {
+              try {
+                const toolResult = await adapter.callFabricTool!(tool.name, {});
+                return `### ${tool.name}\n${JSON.stringify(toolResult, null, 2)}`;
+              } catch {
+                return null;
+              }
+            }),
+          );
+          const validResults = toolResults.filter(Boolean);
+          if (validResults.length > 0) {
+            gatewayContext = `Use this live infrastructure data to inform your response:\n\n${validResults.join("\n\n")}`;
+          }
+        }
+      } catch {
+        // Gateway unreachable — proceed without extra context
+      }
+
+      if (gatewayContext) {
+        history.splice(history.length - 1, 0, { role: "user", content: gatewayContext });
+      }
+    }
+
     result = await adapter.complete(
-      history.map((m) => ({
-        role: m.role as "user" | "assistant",
-        content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-      })) as CompletionMessage[],
+      historyToCompletionMessages(history),
+      { model: session.model, systemPrompt: session.systemPrompt, maxTokens },
+    );
+  } else {
+    // ── Path 3: No gateway — straight completion ──────────────────────────
+    result = await adapter.complete(
+      historyToCompletionMessages(history),
       { model: session.model, systemPrompt: session.systemPrompt, maxTokens },
     );
   }
