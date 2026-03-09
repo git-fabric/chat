@@ -51,8 +51,8 @@ function detectFabricApp(message: string): typeof MOE_ROUTES[number] | null {
   return best ? best.route : null;
 }
 
-/** Best summary tool for each fabric app — curated for rich output */
-const PREFERRED_SUMMARY_TOOL: Record<string, string> = {
+/** Default summary tool for each fabric app (used for bare app name queries) */
+const SUMMARY_TOOLS: Record<string, string> = {
   unifi: "unifi_network_status",
   proxmox: "pve_cluster_status",
   k8s: "k8s_cluster_info",
@@ -63,28 +63,176 @@ const PREFERRED_SUMMARY_TOOL: Record<string, string> = {
   git: "git_repo_list",
 };
 
-/** Fetch live data from a fabric app by calling its best summary tool */
+/** Specific query patterns → tool mappings for targeted questions */
+const SPECIFIC_QUERIES: Array<{ pattern: RegExp; app: string; tool: string; args?: Record<string, unknown> }> = [
+  // K8s
+  { pattern: /how many pods|list pods|pod count|pods running|pods status/i, app: "k8s", tool: "k8s_list_pods", args: {} },
+  { pattern: /pod (problem|fail|crash|error|not ready)/i, app: "k8s", tool: "k8s_pod_problems" },
+  { pattern: /deployment|deployments/i, app: "k8s", tool: "k8s_list_deployments" },
+  { pattern: /node status|nodes|cluster nodes/i, app: "k8s", tool: "k8s_list_nodes" },
+  { pattern: /event|warning|cluster event/i, app: "k8s", tool: "k8s_list_events" },
+  { pattern: /argocd|argo app|sync status/i, app: "k8s", tool: "k8s_list_argocd_apps" },
+  { pattern: /pvc|volume|storage claim/i, app: "k8s", tool: "k8s_list_pvcs" },
+  { pattern: /longhorn/i, app: "k8s", tool: "k8s_list_longhorn_volumes" },
+  { pattern: /ingress|route|traefik/i, app: "k8s", tool: "k8s_list_ingress_routes" },
+  // UniFi
+  { pattern: /device|ap |access point|switch/i, app: "unifi", tool: "unifi_list_devices" },
+  { pattern: /client|connected|bandwidth/i, app: "unifi", tool: "unifi_network_status" },
+  { pattern: /site/i, app: "unifi", tool: "unifi_list_sites" },
+  // Proxmox
+  { pattern: /vm|virtual machine/i, app: "proxmox", tool: "pve_list_vms", args: { node: "pve01" } },
+  { pattern: /container|lxc/i, app: "proxmox", tool: "pve_list_containers", args: { node: "pve01" } },
+  { pattern: /storage|disk/i, app: "proxmox", tool: "pve_list_storage" },
+  { pattern: /task|job/i, app: "proxmox", tool: "pve_list_tasks" },
+  // Tailscale
+  { pattern: /device|machine|node/i, app: "tailscale", tool: "ts_list_devices" },
+  { pattern: /acl|access control|policy/i, app: "tailscale", tool: "ts_get_acl" },
+  { pattern: /dns|nameserver/i, app: "tailscale", tool: "ts_get_dns" },
+  // Cloudflare
+  { pattern: /dns record|record/i, app: "cloudflare", tool: "cf_list_dns_records" },
+  { pattern: /analytic|traffic|bandwidth/i, app: "cloudflare", tool: "cf_zone_analytics" },
+  // Git
+  { pattern: /pull request|pr /i, app: "git", tool: "git_pr_list" },
+  { pattern: /commit/i, app: "git", tool: "git_commit_list" },
+  // Sandfly
+  { pattern: /alert|threat|finding/i, app: "sandfly", tool: "sandfly_get_alerts" },
+  { pattern: /host|server|machine/i, app: "sandfly", tool: "sandfly_list_hosts" },
+  { pattern: /scan|result/i, app: "sandfly", tool: "sandfly_get_results" },
+];
+
+/** Determine which tool to call based on the user message */
+function selectTool(app: string, message: string): { tool: string; args: Record<string, unknown> } {
+  // Check for specific query patterns first
+  for (const q of SPECIFIC_QUERIES) {
+    if (q.app === app && q.pattern.test(message)) {
+      return { tool: q.tool, args: q.args ?? {} };
+    }
+  }
+  // Fall back to default summary tool
+  return { tool: SUMMARY_TOOLS[app] ?? `${app}_health`, args: {} };
+}
+
+// ── Pre-formatters: turn raw JSON into readable reports ─────────────────────
+// The 3b model is bad at parsing JSON. Do the heavy lifting in code.
+
+type AnyRecord = Record<string, unknown>;
+
+function formatUnifi(data: AnyRecord): string {
+  const summary = data.summary as AnyRecord | undefined;
+  const devices = data.devices as AnyRecord[] | undefined;
+  if (!summary || !devices) return JSON.stringify(data, null, 2);
+
+  const devSummary = summary.devices as AnyRecord | undefined;
+  const lines: string[] = [
+    `## UniFi Network Report`,
+    ``,
+    `**${devSummary?.total ?? "?"} devices** — ${devSummary?.online ?? "?"} online, ${devSummary?.offline ?? "?"} offline`,
+    `**${summary.hosts ?? "?"} host(s)**, **${summary.sites ?? "?"} site(s)**`,
+    ``,
+    `### Devices`,
+  ];
+
+  for (const d of devices) {
+    const status = d.status === "online" ? "✅" : "🔴";
+    const fw = d.firmwareStatus === "upToDate" ? "" : ` ⚠️ ${d.firmwareStatus}`;
+    lines.push(`${status} **${d.name}** (${d.model}) — ${d.ip}${d.version ? ` v${d.version}` : ""}${fw}`);
+  }
+
+  const offline = devices.filter((d) => d.status !== "online");
+  if (offline.length > 0) {
+    lines.push("", "### Issues");
+    for (const d of offline) lines.push(`- **${d.name}** (${d.model}) is offline — MAC: ${d.mac}`);
+  }
+
+  return lines.join("\n");
+}
+
+function formatProxmox(data: unknown): string {
+  if (!Array.isArray(data)) return JSON.stringify(data, null, 2);
+  const lines = ["## Proxmox Cluster Report", ""];
+  for (const node of data) {
+    const n = node as AnyRecord;
+    lines.push(`- **${n.node ?? n.name}** — status: ${n.status ?? "unknown"}, type: ${n.type ?? "?"}`);
+  }
+  return lines.join("\n");
+}
+
+function formatK8s(data: AnyRecord): string {
+  const lines = [
+    "## Kubernetes Cluster Report",
+    "",
+    `- **Server version:** ${data.serverVersion ?? "?"}`,
+    `- **Nodes:** ${data.nodeCount ?? "?"}`,
+    `- **Namespaces:** ${data.namespaceCount ?? "?"}`,
+    `- **Pods:** ${data.podCount ?? "?"}`,
+  ];
+  if (data.nodes && Array.isArray(data.nodes)) {
+    lines.push("", "### Nodes");
+    for (const n of data.nodes as AnyRecord[]) {
+      lines.push(`- **${n.name}** — ${n.status ?? "?"}, ${n.roles ?? "worker"}, ${n.kubeletVersion ?? ""}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function formatTailscale(data: AnyRecord): string {
+  const lines = [
+    "## Tailscale Network Report",
+    "",
+    `- **Total devices:** ${data.totalDevices ?? data.devices ?? "?"}`,
+    `- **Authorized:** ${data.authorized ?? "?"}`,
+    `- **Exit nodes:** ${data.exitNodes ?? "?"}`,
+  ];
+  return lines.join("\n");
+}
+
+function formatGeneric(app: string, data: unknown): string {
+  const title = app.charAt(0).toUpperCase() + app.slice(1);
+  if (Array.isArray(data)) {
+    const lines = [`## ${title} Report`, "", `**${data.length} items**`, ""];
+    for (const item of data.slice(0, 20)) {
+      const i = item as AnyRecord;
+      const name = i.name ?? i.full_name ?? i.id ?? "?";
+      const desc = i.description ?? i.status ?? "";
+      lines.push(`- **${name}**${desc ? ` — ${desc}` : ""}`);
+    }
+    if (data.length > 20) lines.push(`- ... and ${data.length - 20} more`);
+    return lines.join("\n");
+  }
+  return `## ${title} Report\n\n${JSON.stringify(data, null, 2)}`;
+}
+
+const FORMATTERS: Record<string, (data: unknown) => string> = {
+  unifi: (d) => formatUnifi(d as AnyRecord),
+  proxmox: (d) => formatProxmox(d),
+  k8s: (d) => formatK8s(d as AnyRecord),
+  tailscale: (d) => formatTailscale(d as AnyRecord),
+};
+
+/** Fetch live data from a fabric app, pre-format into a readable report */
 async function fetchFabricSummary(
   service: string,
   port: number,
   app: string,
+  message: string,
 ): Promise<string | null> {
   const baseUrl = `http://${service}.fabric-sdk:${port}`;
-  const preferredTool = PREFERRED_SUMMARY_TOOL[app];
+  const { tool, args } = selectTool(app, message);
 
   try {
-    // Call the preferred summary tool directly
-    const toolName = preferredTool ?? `${app}_health`;
     const callRes = await fetch(`${baseUrl}/tools/call`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: toolName, arguments: {} }),
+      body: JSON.stringify({ name: tool, arguments: args }),
       signal: AbortSignal.timeout(15000),
     });
     if (!callRes.ok) return null;
     const result = await callRes.json();
-    const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-    return text.length > 0 ? `[${toolName}]\n${text}` : null;
+
+    // Pre-format the data so the LLM doesn't have to parse JSON
+    const formatter = FORMATTERS[app];
+    if (formatter) return formatter(result);
+    return formatGeneric(app, result);
   } catch {
     return null;
   }
@@ -217,7 +365,7 @@ export async function sendMessage(
         const detected = detectFabricApp(content);
         if (!detected) return null;
         try {
-          return await fetchFabricSummary(detected.service, detected.port, detected.app);
+          return await fetchFabricSummary(detected.service, detected.port, detected.app, content);
         } catch { return null; }
       })()
     : Promise.resolve(null);
@@ -243,7 +391,7 @@ export async function sendMessage(
     const detected = detectFabricApp(content)!;
     history.push({
       role: "user",
-      content: `[System context — live ${detected.app} data]\n\n${fabricContext}\n\nSummarize this data in a clear, concise report for the user.`,
+      content: `Here is the live ${detected.app} report. Present this to the user as-is, adding brief commentary on anything notable (offline devices, issues, warnings). Do not list tool names.\n\n${fabricContext}`,
     });
   }
 
