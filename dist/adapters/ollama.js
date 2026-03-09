@@ -31,6 +31,8 @@ export async function ollamaComplete(config, systemPrompt, messages) {
             model: config.model,
             messages: ollamaMessages,
             stream: false,
+            keep_alive: "30m",
+            options: { num_predict: 512 },
         }),
     });
     if (!res.ok) {

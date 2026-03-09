@@ -214,61 +214,7 @@ export function createAdapterFromEnv() {
         //
         // When no gateway: try Ollama directly if configured, else fall through to Claude.
         async complete(messages, opts) {
-            const lastMessage = messages[messages.length - 1]?.content ?? "";
-            // ── Gateway intercept (if available) ──────────────────────────
-            if (gatewayUrl) {
-                try {
-                    const interceptRes = await fetch(`${gatewayUrl}/intercept`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            query_text: lastMessage,
-                            domain_hint: opts.systemPrompt ? "fabric.chat" : undefined,
-                            requestor_fabric_id: "fabric-chat",
-                        }),
-                        signal: AbortSignal.timeout(5000),
-                    });
-                    if (interceptRes.ok) {
-                        const intercept = await interceptRes.json();
-                        // Deterministic — gateway already has the answer
-                        if (intercept.lane === "deterministic" && intercept.context) {
-                            return {
-                                content: intercept.context,
-                                inputTokens: 0,
-                                outputTokens: 0,
-                                model: "gateway-deterministic",
-                                routingLane: "deterministic",
-                            };
-                        }
-                        // Local-LLM — use Ollama with injected context
-                        if (intercept.lane === "local-llm" && ollamaConfig) {
-                            const contextMessages = intercept.context
-                                ? [{ role: "system", content: `Context from fabric knowledge base:\n\n${intercept.context}` }, ...messages]
-                                : messages;
-                            try {
-                                const result = await ollamaComplete(ollamaConfig, opts.systemPrompt, contextMessages);
-                                return { ...result, routingLane: "local-llm" };
-                            }
-                            catch {
-                                // Ollama failed — fall through to Claude
-                            }
-                        }
-                        // Claude lane or Ollama unavailable — fall through with context injection
-                        if (intercept.context && anthropic) {
-                            const augmented = [
-                                { role: "system", content: `Context from fabric knowledge base:\n\n${intercept.context}` },
-                                ...messages,
-                            ];
-                            const result = await anthropicComplete(anthropic, opts.model, opts.systemPrompt, augmented, opts.maxTokens);
-                            return { ...result, routingLane: "claude" };
-                        }
-                    }
-                }
-                catch {
-                    // Gateway unreachable — fall through to direct routing
-                }
-            }
-            // ── Direct Ollama (no gateway, but Ollama configured) ─────────
+            // ── Ollama first (fast path — no gateway intercept overhead) ────
             if (ollamaConfig) {
                 try {
                     return await ollamaComplete(ollamaConfig, opts.systemPrompt, messages);
