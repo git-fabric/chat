@@ -40,6 +40,20 @@ function detectFabricApp(message) {
     }
     return best ? best.route : null;
 }
+/** Does the message need LLM reasoning, or is a pre-formatted report sufficient? */
+function needsLlmReasoning(message) {
+    const lower = message.toLowerCase().trim();
+    // Questions need reasoning
+    if (/\?$/.test(lower))
+        return true;
+    if (/^(how|what|why|when|where|which|who|can|could|should|is|are|do|does|will|would|explain|compare|tell me|help|describe)[\s,]/.test(lower))
+        return true;
+    // Multi-word analysis requests
+    if (/\b(wrong|issue|problem|fix|diagnose|troubleshoot|analyze|recommend|suggest)\b/.test(lower))
+        return true;
+    // Short keyword-style messages → report is enough
+    return false;
+}
 /** Default summary tools for each fabric app (used for bare app name queries) */
 /** Multiple tools are fetched in parallel and merged for richer reports */
 const SUMMARY_TOOLS = {
@@ -420,6 +434,27 @@ export async function sendMessage(adapter, sessionId, content, maxTokens = 8192)
     if (session.state === "archived") {
         throw new Error(`Session ${sessionId} is archived. Resume it or create a new session.`);
     }
+    // ── Deterministic short-circuit: report without LLM ───────────────────────
+    if (fabricContext && !needsLlmReasoning(content)) {
+        fireAndForget(async () => {
+            const userMsg = await adapter.addMessage({ sessionId, role: "user", content });
+            await adapter.embedAndStore(userMsg);
+            const assistantMsg = await adapter.addMessage({
+                sessionId, role: "assistant", content: fabricContext,
+                model: "deterministic", inputTokens: 0, outputTokens: 0,
+            });
+            await adapter.embedAndStore(assistantMsg);
+        });
+        return {
+            messageId: sessionId,
+            role: "assistant",
+            content: fabricContext,
+            inputTokens: 0,
+            outputTokens: 0,
+            model: session.model,
+            routingLane: "deterministic",
+        };
+    }
     // ── Build history from session (already in memory) ────────────────────────
     const history = [
         ...session.messages
@@ -429,12 +464,11 @@ export async function sendMessage(adapter, sessionId, content, maxTokens = 8192)
             content: m.content,
         })),
     ];
-    // Inject fabric context before the user message if we have it
+    // Inject fabric context before the user message if we have it (question path)
     if (fabricContext) {
-        const detected = detectFabricApp(content);
         history.push({
             role: "user",
-            content: `REPORT BELOW — copy it exactly as-is to the user. Do not add, remove, or rephrase any lines. Only add 1-2 sentences at the end if something looks wrong (offline nodes, errors). Never invent data.\n\n${fabricContext}`,
+            content: `Use this live data to answer the user's question. Only reference what's in the data — do not invent information.\n\n${fabricContext}`,
         });
     }
     history.push({ role: "user", content });
@@ -522,6 +556,22 @@ export async function* sendMessageStream(adapter, sessionId, content) {
         yield { error: `Session ${sessionId} is archived.` };
         return;
     }
+    // ── Deterministic short-circuit: report without LLM ───────────────────────
+    if (fabricContext && !needsLlmReasoning(content)) {
+        // Yield the entire report as one token — instant response
+        yield { token: fabricContext };
+        yield { done: true, inputTokens: 0, outputTokens: 0, model: "deterministic" };
+        fireAndForget(async () => {
+            const userMsg = await adapter.addMessage({ sessionId, role: "user", content });
+            await adapter.embedAndStore(userMsg);
+            const assistantMsg = await adapter.addMessage({
+                sessionId, role: "assistant", content: fabricContext,
+                model: "deterministic", inputTokens: 0, outputTokens: 0,
+            });
+            await adapter.embedAndStore(assistantMsg);
+        });
+        return;
+    }
     // ── Build history ──────────────────────────────────────────────────────────
     const history = [
         ...session.messages
@@ -529,10 +579,9 @@ export async function* sendMessageStream(adapter, sessionId, content) {
             .map((m) => ({ role: m.role, content: m.content })),
     ];
     if (fabricContext) {
-        const detected = detectFabricApp(content);
         history.push({
             role: "user",
-            content: `REPORT BELOW — copy it exactly as-is to the user. Do not add, remove, or rephrase any lines. Only add 1-2 sentences at the end if something looks wrong (offline nodes, errors). Never invent data.\n\n${fabricContext}`,
+            content: `Use this live data to answer the user's question. Only reference what's in the data — do not invent information.\n\n${fabricContext}`,
         });
     }
     history.push({ role: "user", content });
