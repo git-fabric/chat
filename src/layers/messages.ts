@@ -193,28 +193,42 @@ async function completeWithTools(
 
 // ── sendMessage ───────────────────────────────────────────────────────────────
 
+// Fire-and-forget helper — runs async work without blocking the caller
+function fireAndForget(fn: () => Promise<unknown>): void {
+  fn().catch(() => {});
+}
+
 export async function sendMessage(
   adapter: ChatAdapter,
   sessionId: string,
   content: string,
   maxTokens = 8192,
 ): Promise<SendResult> {
-  const session = await adapter.getSession(sessionId);
+  const isOllama = !!process.env.OLLAMA_ENDPOINT;
+  const hasFabricGateway =
+    typeof adapter.listFabricTools === "function" &&
+    typeof adapter.callFabricTool === "function";
+
+  // ── Parallel: fetch session + pre-fetch fabric data simultaneously ────────
+  // Only fetch last 20 messages for LLM context — no need to load entire history
+  const sessionPromise = adapter.getSession(sessionId, 20);
+  const prefetchPromise = isOllama
+    ? (async () => {
+        const detected = detectFabricApp(content);
+        if (!detected) return null;
+        try {
+          return await fetchFabricSummary(detected.service, detected.port, detected.app);
+        } catch { return null; }
+      })()
+    : Promise.resolve(null);
+
+  const [session, fabricContext] = await Promise.all([sessionPromise, prefetchPromise]);
+
   if (session.state === "archived") {
     throw new Error(`Session ${sessionId} is archived. Resume it or create a new session.`);
   }
 
-  // Store the user message
-  const userMsg = await adapter.addMessage({ sessionId, role: "user", content });
-
-  // Embed user message (best-effort)
-  try {
-    await adapter.embedAndStore(userMsg);
-  } catch {
-    // Non-fatal
-  }
-
-  // Build Anthropic message history
+  // ── Build history from session (already in memory) ────────────────────────
   const history: Anthropic.MessageParam[] = [
     ...session.messages
       .filter((m) => m.role === "user" || m.role === "assistant")
@@ -222,38 +236,32 @@ export async function sendMessage(
         role: m.role as "user" | "assistant",
         content: m.content,
       })),
-    { role: "user", content },
   ];
 
-  const isOllama = !!process.env.OLLAMA_ENDPOINT;
-  const hasFabricGateway =
-    typeof adapter.listFabricTools === "function" &&
-    typeof adapter.callFabricTool === "function";
-  // ── Ollama pre-fetch: detect fabric app from message & inject live data ────
-  if (isOllama) {
-    const detected = detectFabricApp(content);
-    if (detected) {
-      try {
-        const context = await fetchFabricSummary(detected.service, detected.port, detected.app);
-        if (context) {
-          history.splice(history.length - 1, 0, {
-            role: "user",
-            content: `[System context — live ${detected.app} data]\n\n${context}\n\nSummarize this data in a clear, concise report for the user.`,
-          });
-        }
-      } catch {
-        // Pre-fetch failed — continue without context
-      }
-    }
+  // Inject fabric context before the user message if we have it
+  if (fabricContext) {
+    const detected = detectFabricApp(content)!;
+    history.push({
+      role: "user",
+      content: `[System context — live ${detected.app} data]\n\n${fabricContext}\n\nSummarize this data in a clear, concise report for the user.`,
+    });
   }
 
+  history.push({ role: "user", content });
+
+  // ── Store user message — fire and forget ──────────────────────────────────
+  fireAndForget(async () => {
+    const userMsg = await adapter.addMessage({ sessionId, role: "user", content });
+    await adapter.embedAndStore(userMsg);
+  });
+
+  // ── LLM completion (the only blocking step the user waits for) ────────────
   let result: { content: string; inputTokens: number; outputTokens: number; routingLane?: RoutingLane };
 
   if (hasFabricGateway && !isOllama) {
     let fabricTools: FabricTool[] = [];
     try {
       const allTools = await adapter.listFabricTools!();
-      // Change A: pre-filter tools to only those relevant to this message
       const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
       fabricTools = await selectRelevantTools(allTools, content, anthropic);
     } catch {
@@ -290,25 +298,21 @@ export async function sendMessage(
     );
   }
 
-  // Store assistant response
-  const assistantMsg = await adapter.addMessage({
-    sessionId,
-    role: "assistant",
-    content: result.content,
-    model: session.model,
-    inputTokens: result.inputTokens,
-    outputTokens: result.outputTokens,
+  // ── Store assistant response — fire and forget ────────────────────────────
+  fireAndForget(async () => {
+    const assistantMsg = await adapter.addMessage({
+      sessionId,
+      role: "assistant",
+      content: result.content,
+      model: session.model,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+    });
+    await adapter.embedAndStore(assistantMsg);
   });
 
-  // Embed assistant message (best-effort)
-  try {
-    await adapter.embedAndStore(assistantMsg);
-  } catch {
-    // Non-fatal
-  }
-
   return {
-    messageId: assistantMsg.id,
+    messageId: sessionId,  // real ID is being stored async
     role: "assistant",
     content: result.content,
     inputTokens: result.inputTokens,

@@ -130,7 +130,7 @@ export interface ChatAdapter {
     state: "active" | "archived" | "all";
   }): Promise<ChatSession[]>;
 
-  getSession(sessionId: string): Promise<ChatSession & { messages: ChatMessage[] }>;
+  getSession(sessionId: string, messageLimit?: number): Promise<ChatSession & { messages: ChatMessage[] }>;
 
   updateSession(
     sessionId: string,

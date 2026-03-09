@@ -100,7 +100,7 @@ export interface ChatAdapter {
         limit: number;
         state: "active" | "archived" | "all";
     }): Promise<ChatSession[]>;
-    getSession(sessionId: string): Promise<ChatSession & {
+    getSession(sessionId: string, messageLimit?: number): Promise<ChatSession & {
         messages: ChatMessage[];
     }>;
     updateSession(sessionId: string, patch: Partial<Pick<ChatSession, "state" | "title">>): Promise<ChatSession>;

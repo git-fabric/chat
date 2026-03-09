@@ -223,13 +223,14 @@ export function createAdapterFromEnv(): ChatAdapter {
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     },
 
-    async getSession(sessionId) {
+    async getSession(sessionId, messageLimit?: number) {
       await boot();
       const payload = await getPoint(qdrantUrl!, qdrantKey, sessionId);
       if (!payload) throw new Error(`Session not found: ${sessionId}`);
       const session = payloadToSession(payload);
 
-      // Fetch messages ordered by timestamp
+      // Fetch recent messages — limit to last N for LLM context efficiency
+      const limit = messageLimit ?? 1000;
       const msgResult = await scroll(
         qdrantUrl!,
         qdrantKey,
@@ -237,13 +238,16 @@ export function createAdapterFromEnv(): ChatAdapter {
           { key: "_type", match: { value: TYPE_MESSAGE } },
           { key: "sessionId", match: { value: sessionId } },
         ]},
-        1000,
+        limit,
       );
       const messages = msgResult.points
         .map((p) => payloadToMessage(p.payload))
         .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
-      return { ...session, messages };
+      // If we hit the limit, only keep the most recent messages
+      const trimmed = messages.length >= limit ? messages.slice(-limit) : messages;
+
+      return { ...session, messages: trimmed };
     },
 
     async updateSession(sessionId, patch) {
