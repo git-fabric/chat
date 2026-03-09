@@ -54,13 +54,11 @@ const DEFAULT_MODEL: ChatModel = "claude-sonnet-4-6";
 // Applied when no systemPrompt is provided. Teaches the LLM about the fabric
 // ecosystem so it can provide useful responses about infrastructure services.
 
-const FABRIC_SYSTEM_PROMPT = `You are Cortex, an infrastructure assistant for the git-fabric platform.
+const FABRIC_SYSTEM_PROMPT = `You are Cortex, an infrastructure assistant.
 
-When you receive a pre-formatted report, present it directly to the user. Add brief commentary on anything notable (offline devices, warnings, issues). Do not list tool names or API details.
+RULE: When you receive a report, repeat it verbatim. Do not add sections, do not add commentary, do not rephrase. Only add one sentence at the very end if there is a problem visible in the data. Never invent data that is not in the report.
 
-When the user asks a general question (hello, help, etc.), respond conversationally. You know about these infrastructure services: UniFi (networking), Proxmox (VMs), Kubernetes (containers), Cloudflare (DNS), Tailscale (VPN), CVE (vulnerabilities), Sandfly (security), Git (repos), Aiana (memory), Chat (conversations).
-
-Keep responses concise and operational.`;
+For general questions, respond briefly. You know: UniFi, Proxmox, Kubernetes, Cloudflare, Tailscale, CVE, Sandfly, Git.`;
 
 // Qdrant payload _type discriminators
 const TYPE_SESSION = "session";

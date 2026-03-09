@@ -197,14 +197,14 @@ function fmtBytes(bytes) {
 }
 function formatK8s(data) {
     const cluster = data.cluster;
-    const nodeList = data.nodes;
-    const nodes = (nodeList?.nodes ?? []);
+    // list_nodes returns a flat array, not {nodes: [...]}
+    const rawNodes = data.nodes;
+    const nodes = (Array.isArray(rawNodes) ? rawNodes : rawNodes?.nodes ?? []);
     const lines = [
         "## Kubernetes Cluster Report",
         "",
-        `- **Server version:** ${cluster?.serverVersion ?? "?"}`,
-        `- **Platform:** ${cluster?.platform ?? "?"}`,
-        `- **Nodes:** ${cluster?.nodeCount ?? nodes.length ?? "?"}`,
+        `- **Server version:** ${cluster?.serverVersion ?? "?"} (${cluster?.platform ?? "?"})`,
+        `- **Nodes:** ${cluster?.nodeCount ?? nodes.length}`,
         `- **Namespaces:** ${cluster?.namespaceCount ?? "?"}`,
         `- **Pods:** ${cluster?.podCount ?? "?"}`,
     ];
@@ -212,10 +212,10 @@ function formatK8s(data) {
         lines.push("", "### Nodes");
         for (const n of nodes) {
             const status = n.status === "Ready" ? "✅" : "🔴";
-            const roles = Array.isArray(n.roles) ? n.roles.join(", ") : (n.roles ?? "worker");
-            const mem = n.capacity ? ` — ${n.capacity.memory ?? ""}` : "";
-            const cpu = n.capacity ? ` / ${n.capacity.cpu ?? ""} CPU` : "";
-            lines.push(`${status} **${n.name}** (${roles}) ${n.version ?? ""}${mem}${cpu}`);
+            const roles = String(n.roles ?? "worker");
+            const age = n.age ? ` — age: ${n.age}` : "";
+            const os = n.os ? ` — ${n.os}` : "";
+            lines.push(`${status} **${n.name}** (${roles}) ${n.version ?? ""}${age}${os}`);
         }
     }
     return lines.join("\n");
@@ -434,7 +434,7 @@ export async function sendMessage(adapter, sessionId, content, maxTokens = 8192)
         const detected = detectFabricApp(content);
         history.push({
             role: "user",
-            content: `Here is the live ${detected.app} report. Present this to the user as-is, adding brief commentary on anything notable (offline devices, issues, warnings). Do not list tool names.\n\n${fabricContext}`,
+            content: `REPORT BELOW — copy it exactly as-is to the user. Do not add, remove, or rephrase any lines. Only add 1-2 sentences at the end if something looks wrong (offline nodes, errors). Never invent data.\n\n${fabricContext}`,
         });
     }
     history.push({ role: "user", content });
@@ -532,7 +532,7 @@ export async function* sendMessageStream(adapter, sessionId, content) {
         const detected = detectFabricApp(content);
         history.push({
             role: "user",
-            content: `Here is the live ${detected.app} report. Present this to the user as-is, adding brief commentary on anything notable (offline devices, issues, warnings). Do not list tool names.\n\n${fabricContext}`,
+            content: `REPORT BELOW — copy it exactly as-is to the user. Do not add, remove, or rephrase any lines. Only add 1-2 sentences at the end if something looks wrong (offline nodes, errors). Never invent data.\n\n${fabricContext}`,
         });
     }
     history.push({ role: "user", content });
