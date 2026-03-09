@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { createApp } from "../dist/app.js";
+import { createAdapterFromEnv } from "../dist/adapters/env.js";
+import { sendMessageStream } from "../dist/layers/messages.js";
 import { Library } from "../dist/library.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -14,6 +16,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const UI_HTML = readFileSync(join(__dirname, "..", "ui", "index.html"), "utf8");
 
 const app = createApp();
+const adapter = createAdapterFromEnv();
 const library = new Library();
 
 function buildServer() {
@@ -157,6 +160,35 @@ if (httpPort) {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: err.message }));
       }
+      return;
+    }
+    if (req.url === "/stream" && req.method === "POST") {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      const { sessionId, content } = body;
+
+      if (!sessionId || !content) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "sessionId and content required" }));
+        return;
+      }
+
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+
+      try {
+        for await (const event of sendMessageStream(adapter, sessionId, content)) {
+          res.write(`data: ${JSON.stringify(event)}\n\n`);
+        }
+      } catch (err) {
+        res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+      }
+      res.end();
       return;
     }
     if (req.url === "/mcp") {

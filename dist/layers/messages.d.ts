@@ -20,6 +20,14 @@ export interface SendResult {
     routingLane?: RoutingLane;
 }
 export declare function sendMessage(adapter: ChatAdapter, sessionId: string, content: string, maxTokens?: number): Promise<SendResult>;
+export declare function sendMessageStream(adapter: ChatAdapter, sessionId: string, content: string): AsyncGenerator<{
+    token?: string;
+    done?: boolean;
+    inputTokens?: number;
+    outputTokens?: number;
+    model?: string;
+    error?: string;
+}>;
 export declare function listMessages(adapter: ChatAdapter, sessionId: string, limit?: number, offset?: number): Promise<ChatMessage[]>;
 export declare function injectContext(adapter: ChatAdapter, sessionId: string, context: string, role?: "system" | "user"): Promise<{
     messageId: string;

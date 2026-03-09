@@ -48,6 +48,58 @@ export async function ollamaComplete(config, systemPrompt, messages) {
         routingLane: "local-llm",
     };
 }
+export async function* ollamaCompleteStream(config, systemPrompt, messages) {
+    const ollamaMessages = [];
+    if (systemPrompt) {
+        ollamaMessages.push({ role: "system", content: systemPrompt });
+    }
+    for (const m of messages) {
+        if (m.role === "user" || m.role === "assistant") {
+            ollamaMessages.push({ role: m.role, content: m.content });
+        }
+    }
+    const res = await fetch(`${config.endpoint}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            model: config.model,
+            messages: ollamaMessages,
+            stream: true,
+            keep_alive: "30m",
+            options: { num_predict: 512 },
+        }),
+    });
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Ollama stream failed (${res.status}): ${text}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done)
+            break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop(); // keep incomplete line in buffer
+        for (const line of lines) {
+            if (!line.trim())
+                continue;
+            const chunk = JSON.parse(line);
+            if (chunk.done) {
+                yield {
+                    done: true,
+                    inputTokens: chunk.prompt_eval_count ?? 0,
+                    outputTokens: chunk.eval_count ?? 0,
+                };
+            }
+            else if (chunk.message?.content) {
+                yield { token: chunk.message.content };
+            }
+        }
+    }
+}
 export async function embedOllama(endpoint, model, text) {
     const res = await fetch(`${endpoint}/api/embed`, {
         method: "POST",

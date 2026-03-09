@@ -12,6 +12,12 @@ export interface OllamaConfig {
 }
 export declare function createOllamaConfig(): OllamaConfig | null;
 export declare function ollamaComplete(config: OllamaConfig, systemPrompt: string | undefined, messages: CompletionMessage[]): Promise<CompletionResult>;
+export declare function ollamaCompleteStream(config: OllamaConfig, systemPrompt: string | undefined, messages: CompletionMessage[]): AsyncGenerator<{
+    token?: string;
+    done?: boolean;
+    inputTokens?: number;
+    outputTokens?: number;
+}>;
 export declare function embedOllama(endpoint: string, model: string, text: string): Promise<number[]>;
 export declare function pingOllama(config: OllamaConfig): Promise<{
     latencyMs: number;

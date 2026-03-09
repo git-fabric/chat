@@ -12,6 +12,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { selectRelevantTools } from "../adapters/gateway.js";
+import { createOllamaConfig, ollamaCompleteStream } from "../adapters/ollama.js";
 import type {
   ChatAdapter,
   ChatMessage,
@@ -468,6 +469,94 @@ export async function sendMessage(
     model: session.model,
     routingLane: result.routingLane,
   };
+}
+
+// ── sendMessageStream (SSE streaming for Ollama) ─────────────────────────────
+
+export async function* sendMessageStream(
+  adapter: ChatAdapter,
+  sessionId: string,
+  content: string,
+): AsyncGenerator<{ token?: string; done?: boolean; inputTokens?: number; outputTokens?: number; model?: string; error?: string }> {
+  const ollamaConfig = createOllamaConfig();
+  if (!ollamaConfig) {
+    // Fall back to non-streaming — yield complete response at once
+    const result = await sendMessage(adapter, sessionId, content);
+    yield { token: result.content };
+    yield { done: true, inputTokens: result.inputTokens, outputTokens: result.outputTokens, model: result.model };
+    return;
+  }
+
+  // ── Parallel: fetch session + pre-fetch fabric data ────────────────────────
+  const sessionPromise = adapter.getSession(sessionId, 20);
+  const prefetchPromise = (async () => {
+    const detected = detectFabricApp(content);
+    if (!detected) return null;
+    try {
+      return await fetchFabricSummary(detected.service, detected.port, detected.app, content);
+    } catch { return null; }
+  })();
+
+  const [session, fabricContext] = await Promise.all([sessionPromise, prefetchPromise]);
+
+  if (session.state === "archived") {
+    yield { error: `Session ${sessionId} is archived.` };
+    return;
+  }
+
+  // ── Build history ──────────────────────────────────────────────────────────
+  const history: { role: string; content: string }[] = [
+    ...session.messages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ role: m.role, content: m.content })),
+  ];
+
+  if (fabricContext) {
+    const detected = detectFabricApp(content)!;
+    history.push({
+      role: "user",
+      content: `Here is the live ${detected.app} report. Present this to the user as-is, adding brief commentary on anything notable (offline devices, issues, warnings). Do not list tool names.\n\n${fabricContext}`,
+    });
+  }
+
+  history.push({ role: "user", content });
+
+  // ── Store user message — fire and forget ──────────────────────────────────
+  fireAndForget(async () => {
+    const userMsg = await adapter.addMessage({ sessionId, role: "user", content });
+    await adapter.embedAndStore(userMsg);
+  });
+
+  // ── Stream from Ollama ────────────────────────────────────────────────────
+  let fullContent = "";
+  let inputTokens = 0;
+  let outputTokens = 0;
+
+  for await (const chunk of ollamaCompleteStream(ollamaConfig, session.systemPrompt, history)) {
+    if (chunk.token) {
+      fullContent += chunk.token;
+      yield { token: chunk.token };
+    }
+    if (chunk.done) {
+      inputTokens = chunk.inputTokens ?? 0;
+      outputTokens = chunk.outputTokens ?? 0;
+    }
+  }
+
+  yield { done: true, inputTokens, outputTokens, model: ollamaConfig.model };
+
+  // ── Store assistant response — fire and forget ────────────────────────────
+  fireAndForget(async () => {
+    const assistantMsg = await adapter.addMessage({
+      sessionId,
+      role: "assistant",
+      content: fullContent,
+      model: session.model,
+      inputTokens,
+      outputTokens,
+    });
+    await adapter.embedAndStore(assistantMsg);
+  });
 }
 
 export async function listMessages(

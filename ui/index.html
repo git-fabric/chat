@@ -1026,14 +1026,50 @@
                     localStorage.setItem(STORAGE_KEY_CONV, currentSessionId);
                 }
 
-                // Send message — full response returned (not streamed)
-                const result = await callTool('chat_message_send', {
-                    sessionId: currentSessionId,
-                    content: message
+                // Stream response via SSE
+                const res = await fetch(`${GATEWAY_URL}/stream`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sessionId: currentSessionId, content: message }),
                 });
 
+                if (!res.ok) throw new Error(`Stream error ${res.status}: ${await res.text()}`);
+
                 document.getElementById('thinking-indicator').style.display = 'none';
-                appendMessage('assistant', result.content, false);
+
+                // Create assistant bubble for progressive token append
+                const msgDiv = appendMessage('assistant', '', false);
+                const bubble = msgDiv.querySelector('.message-bubble');
+                let fullText = '';
+
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop(); // keep incomplete line
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        const event = JSON.parse(line.slice(6));
+
+                        if (event.error) throw new Error(event.error);
+                        if (event.token) {
+                            fullText += event.token;
+                            bubble.innerHTML = formatMarkdown(fullText);
+                            scrollToBottom();
+                        }
+                        // event.done — streaming complete, tokens in event.inputTokens/outputTokens
+                    }
+                }
+
+                // Final render with complete text
+                bubble.innerHTML = formatMarkdown(fullText);
                 scrollToBottom();
 
                 // Refresh sidebar list
