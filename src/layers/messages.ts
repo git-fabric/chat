@@ -52,16 +52,24 @@ function detectFabricApp(message: string): typeof MOE_ROUTES[number] | null {
   return best ? best.route : null;
 }
 
-/** Default summary tool for each fabric app (used for bare app name queries) */
-const SUMMARY_TOOLS: Record<string, string> = {
-  unifi: "unifi_network_status",
-  proxmox: "pve_cluster_status",
-  k8s: "k8s_cluster_info",
-  cloudflare: "cf_list_zones",
-  tailscale: "ts_health",
-  cve: "cve_queue_stats",
-  sandfly: "sandfly_get_alerts",
-  git: "git_repo_list",
+/** Default summary tools for each fabric app (used for bare app name queries) */
+/** Multiple tools are fetched in parallel and merged for richer reports */
+const SUMMARY_TOOLS: Record<string, Array<{ tool: string; args?: Record<string, unknown>; key: string }>> = {
+  unifi: [{ tool: "unifi_network_status", key: "status" }],
+  proxmox: [
+    { tool: "pve_cluster_status", key: "cluster" },
+    { tool: "pve_list_vms", args: { node: "pve01" }, key: "vms" },
+    { tool: "pve_list_storage", key: "storage" },
+  ],
+  k8s: [
+    { tool: "k8s_cluster_info", key: "cluster" },
+    { tool: "k8s_list_nodes", key: "nodes" },
+  ],
+  cloudflare: [{ tool: "cf_list_zones", key: "zones" }],
+  tailscale: [{ tool: "ts_health", key: "health" }],
+  cve: [{ tool: "cve_queue_stats", key: "stats" }],
+  sandfly: [{ tool: "sandfly_get_alerts", key: "alerts" }],
+  git: [{ tool: "git_repo_list", key: "repos" }],
 };
 
 /** Specific query patterns → tool mappings for targeted questions */
@@ -101,16 +109,16 @@ const SPECIFIC_QUERIES: Array<{ pattern: RegExp; app: string; tool: string; args
   { pattern: /scan|result/i, app: "sandfly", tool: "sandfly_get_results" },
 ];
 
-/** Determine which tool to call based on the user message */
-function selectTool(app: string, message: string): { tool: string; args: Record<string, unknown> } {
-  // Check for specific query patterns first
+/** Determine which tool(s) to call based on the user message */
+function selectTools(app: string, message: string): Array<{ tool: string; args?: Record<string, unknown>; key: string }> {
+  // Check for specific query patterns first — single tool
   for (const q of SPECIFIC_QUERIES) {
     if (q.app === app && q.pattern.test(message)) {
-      return { tool: q.tool, args: q.args ?? {} };
+      return [{ tool: q.tool, args: q.args ?? {}, key: "result" }];
     }
   }
-  // Fall back to default summary tool
-  return { tool: SUMMARY_TOOLS[app] ?? `${app}_health`, args: {} };
+  // Fall back to default summary tools (may be multiple)
+  return SUMMARY_TOOLS[app] ?? [{ tool: `${app}_health`, args: {}, key: "result" }];
 }
 
 // ── Pre-formatters: turn raw JSON into readable reports ─────────────────────
@@ -119,8 +127,10 @@ function selectTool(app: string, message: string): { tool: string; args: Record<
 type AnyRecord = Record<string, unknown>;
 
 function formatUnifi(data: AnyRecord): string {
-  const summary = data.summary as AnyRecord | undefined;
-  const devices = data.devices as AnyRecord[] | undefined;
+  // Handle both direct result and keyed {status: ...} wrapper
+  const inner = (data.status ?? data) as AnyRecord;
+  const summary = inner.summary as AnyRecord | undefined;
+  const devices = inner.devices as AnyRecord[] | undefined;
   if (!summary || !devices) return JSON.stringify(data, null, 2);
 
   const devSummary = summary.devices as AnyRecord | undefined;
@@ -148,42 +158,142 @@ function formatUnifi(data: AnyRecord): string {
   return lines.join("\n");
 }
 
-function formatProxmox(data: unknown): string {
-  if (!Array.isArray(data)) return JSON.stringify(data, null, 2);
+function formatProxmox(data: AnyRecord): string {
+  const cluster = data.cluster as AnyRecord[] | undefined;
+  const vms = data.vms as AnyRecord[] | undefined;
+  const storage = data.storage as AnyRecord[] | undefined;
+
   const lines = ["## Proxmox Cluster Report", ""];
-  for (const node of data) {
-    const n = node as AnyRecord;
-    lines.push(`- **${n.node ?? n.name}** — status: ${n.status ?? "unknown"}, type: ${n.type ?? "?"}`);
+
+  // Nodes from cluster status
+  if (Array.isArray(cluster)) {
+    const nodes = cluster.filter((r) => r.type === "node");
+    const qemuFromCluster = cluster.filter((r) => r.type === "qemu");
+    const lxcFromCluster = cluster.filter((r) => r.type === "lxc");
+
+    lines.push("### Nodes");
+    for (const n of nodes) {
+      const status = n.status === "online" ? "✅" : "🔴";
+      const cpu = n.cpu != null ? ` — CPU: ${(Number(n.cpu) * 100).toFixed(0)}%` : "";
+      const mem = n.maxmem ? ` — RAM: ${fmtBytes(Number(n.mem))}/${fmtBytes(Number(n.maxmem))}` : "";
+      lines.push(`${status} **${n.node}**${cpu}${mem}`);
+    }
+    if (nodes.length === 0) lines.push("- No node data available");
+
+    // VMs from cluster/resources (has CPU/mem)
+    const allVms = qemuFromCluster.length > 0 ? qemuFromCluster : (Array.isArray(vms) ? vms : []);
+    if (allVms.length > 0) {
+      lines.push("", "### Virtual Machines");
+      for (const vm of allVms) {
+        const status = vm.status === "running" ? "✅" : vm.status === "stopped" ? "⏹️" : "⚠️";
+        const cpu = vm.cpu != null ? ` CPU: ${(Number(vm.cpu) * 100).toFixed(0)}%` : "";
+        const mem = vm.maxmem ? ` RAM: ${fmtBytes(Number(vm.mem))}/${fmtBytes(Number(vm.maxmem))}` : "";
+        const name = vm.name ?? `VM ${vm.vmid}`;
+        lines.push(`${status} **${name}** (${vm.status})${cpu}${mem}`);
+      }
+    }
+
+    if (lxcFromCluster.length > 0) {
+      lines.push("", "### Containers (LXC)");
+      for (const ct of lxcFromCluster) {
+        const status = ct.status === "running" ? "✅" : "⏹️";
+        const name = ct.name ?? `CT ${ct.vmid}`;
+        lines.push(`${status} **${name}** (${ct.status})`);
+      }
+    }
+  } else {
+    lines.push("No cluster data available.");
   }
+
+  if (Array.isArray(storage) && storage.length > 0) {
+    lines.push("", "### Storage");
+    for (const s of storage) {
+      const used = s.disk != null && s.maxdisk ? `${fmtBytes(Number(s.disk))}/${fmtBytes(Number(s.maxdisk))}` : "?";
+      const pct = s.disk != null && s.maxdisk ? ` (${((Number(s.disk) / Number(s.maxdisk)) * 100).toFixed(0)}%)` : "";
+      lines.push(`- **${s.storage ?? s.name}** on ${s.node ?? "?"}: ${used}${pct}`);
+    }
+  }
+
   return lines.join("\n");
 }
 
+function fmtBytes(bytes: number): string {
+  if (bytes >= 1073741824) return `${(bytes / 1073741824).toFixed(1)}Gi`;
+  if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(0)}Mi`;
+  return `${(bytes / 1024).toFixed(0)}Ki`;
+}
+
 function formatK8s(data: AnyRecord): string {
+  const cluster = data.cluster as AnyRecord | undefined;
+  const nodeList = data.nodes as AnyRecord | undefined;
+  const nodes = (nodeList?.nodes ?? []) as AnyRecord[];
+
   const lines = [
     "## Kubernetes Cluster Report",
     "",
-    `- **Server version:** ${data.serverVersion ?? "?"}`,
-    `- **Nodes:** ${data.nodeCount ?? "?"}`,
-    `- **Namespaces:** ${data.namespaceCount ?? "?"}`,
-    `- **Pods:** ${data.podCount ?? "?"}`,
+    `- **Server version:** ${cluster?.serverVersion ?? "?"}`,
+    `- **Platform:** ${cluster?.platform ?? "?"}`,
+    `- **Nodes:** ${cluster?.nodeCount ?? nodes.length ?? "?"}`,
+    `- **Namespaces:** ${cluster?.namespaceCount ?? "?"}`,
+    `- **Pods:** ${cluster?.podCount ?? "?"}`,
   ];
-  if (data.nodes && Array.isArray(data.nodes)) {
+
+  if (nodes.length > 0) {
     lines.push("", "### Nodes");
-    for (const n of data.nodes as AnyRecord[]) {
-      lines.push(`- **${n.name}** — ${n.status ?? "?"}, ${n.roles ?? "worker"}, ${n.kubeletVersion ?? ""}`);
+    for (const n of nodes) {
+      const status = n.status === "Ready" ? "✅" : "🔴";
+      const roles = Array.isArray(n.roles) ? (n.roles as string[]).join(", ") : (n.roles ?? "worker");
+      const mem = n.capacity ? ` — ${(n.capacity as AnyRecord).memory ?? ""}` : "";
+      const cpu = n.capacity ? ` / ${(n.capacity as AnyRecord).cpu ?? ""} CPU` : "";
+      lines.push(`${status} **${n.name}** (${roles}) ${n.version ?? ""}${mem}${cpu}`);
     }
   }
+
   return lines.join("\n");
 }
 
 function formatTailscale(data: AnyRecord): string {
+  const health = (data.health ?? data) as AnyRecord;
+  const summary = health.summary as AnyRecord | undefined;
+  const devicesByOs = health.devices_by_os as AnyRecord | undefined;
+  const exitNodes = health.exit_nodes as AnyRecord[] | undefined;
+
   const lines = [
     "## Tailscale Network Report",
     "",
-    `- **Total devices:** ${data.totalDevices ?? data.devices ?? "?"}`,
-    `- **Authorized:** ${data.authorized ?? "?"}`,
-    `- **Exit nodes:** ${data.exitNodes ?? "?"}`,
+    `- **Status:** ${health.healthy ? "✅ Healthy" : "⚠️ Degraded"}`,
+    `- **Total devices:** ${summary?.total_devices ?? "?"}`,
+    `- **Authorized:** ${summary?.authorized ?? "?"}`,
+    `- **Exit nodes:** ${summary?.exit_nodes ?? exitNodes?.length ?? 0}`,
   ];
+
+  if (devicesByOs && Object.keys(devicesByOs).length > 0) {
+    lines.push("", "### Devices by OS");
+    for (const [os, count] of Object.entries(devicesByOs)) {
+      lines.push(`- **${os}:** ${count}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function formatCloudflare(data: AnyRecord): string {
+  const zones = (data.zones ?? data) as unknown;
+  if (!Array.isArray(zones)) return JSON.stringify(data, null, 2);
+
+  const lines = [
+    "## Cloudflare Report",
+    "",
+    `**${zones.length} zone(s)**`,
+    "",
+  ];
+
+  for (const z of zones as AnyRecord[]) {
+    const status = z.status === "active" ? "✅" : "⚠️";
+    const plan = (z.plan as AnyRecord)?.name ?? "?";
+    lines.push(`${status} **${z.name}** — ${z.status}, plan: ${plan}`);
+  }
+
   return lines.join("\n");
 }
 
@@ -203,12 +313,29 @@ function formatGeneric(app: string, data: unknown): string {
   return `## ${title} Report\n\n${JSON.stringify(data, null, 2)}`;
 }
 
-const FORMATTERS: Record<string, (data: unknown) => string> = {
-  unifi: (d) => formatUnifi(d as AnyRecord),
-  proxmox: (d) => formatProxmox(d),
-  k8s: (d) => formatK8s(d as AnyRecord),
-  tailscale: (d) => formatTailscale(d as AnyRecord),
+const FORMATTERS: Record<string, (data: AnyRecord) => string> = {
+  unifi: formatUnifi,
+  proxmox: formatProxmox,
+  k8s: formatK8s,
+  tailscale: formatTailscale,
+  cloudflare: formatCloudflare,
 };
+
+/** Fetch one tool from a fabric app */
+async function callFabricTool(
+  baseUrl: string,
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const res = await fetch(`${baseUrl}/tools/call`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: tool, arguments: args }),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
 
 /** Fetch live data from a fabric app, pre-format into a readable report */
 async function fetchFabricSummary(
@@ -218,22 +345,32 @@ async function fetchFabricSummary(
   message: string,
 ): Promise<string | null> {
   const baseUrl = `http://${service}.fabric-sdk:${port}`;
-  const { tool, args } = selectTool(app, message);
+  const toolSpecs = selectTools(app, message);
 
   try {
-    const callRes = await fetch(`${baseUrl}/tools/call`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: tool, arguments: args }),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!callRes.ok) return null;
-    const result = await callRes.json();
+    // Fetch all tools in parallel
+    const results = await Promise.all(
+      toolSpecs.map(async (spec) => {
+        const result = await callFabricTool(baseUrl, spec.tool, spec.args ?? {});
+        return { key: spec.key, result };
+      }),
+    );
 
-    // Pre-format the data so the LLM doesn't have to parse JSON
+    // If single tool, pass result directly; if multi, merge into keyed object
+    let data: unknown;
+    if (results.length === 1) {
+      data = results[0].result;
+    } else {
+      const merged: AnyRecord = {};
+      for (const r of results) {
+        if (r.result != null) merged[r.key] = r.result;
+      }
+      data = merged;
+    }
+
     const formatter = FORMATTERS[app];
-    if (formatter) return formatter(result);
-    return formatGeneric(app, result);
+    if (formatter) return formatter(data as AnyRecord);
+    return formatGeneric(app, data);
   } catch {
     return null;
   }
