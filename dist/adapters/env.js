@@ -21,6 +21,7 @@ import { createAnthropicClient, complete as anthropicComplete, embed as voyageEm
 import { createOllamaConfig, ollamaComplete, embedOllama, pingOllama } from "./ollama.js";
 import { ensureCollection, upsertPoint, upsertPointNoVec, setPayload, deleteByFilter, deleteById, search as qdrantSearch, scroll, getPoint, setEmbeddingDims, } from "./qdrant.js";
 import { listTools as gatewayListTools, callTool as gatewayCallTool, selectRelevantTools } from "./gateway.js";
+import { createCacheFromEnv } from "./redis.js";
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 // ── Default fabric system prompt ──────────────────────────────────────────────
@@ -286,10 +287,24 @@ export function createAdapterFromEnv() {
             catch { /* measure regardless */ }
             const qdrantLatency = Date.now() - qdrantStart;
             const ollamaHealth = ollamaConfig ? await pingOllama(ollamaConfig) : undefined;
+            // Redis health check
+            let redisHealth;
+            if (process.env.REDIS_URL) {
+                const redisStart = Date.now();
+                try {
+                    const cache = await createCacheFromEnv();
+                    const ok = await cache.ping();
+                    redisHealth = { latencyMs: Date.now() - redisStart, available: ok };
+                }
+                catch {
+                    redisHealth = { latencyMs: Date.now() - redisStart, available: false };
+                }
+            }
             return {
                 anthropic: { latencyMs: anthropicLatency },
                 qdrant: { latencyMs: qdrantLatency },
                 ...(ollamaHealth ? { ollama: ollamaHealth } : {}),
+                ...(redisHealth ? { redis: redisHealth } : {}),
             };
         },
         // ── Fabric gateway (optional) ─────────────────────────────────────────────

@@ -78,6 +78,7 @@ export interface ChatHealth {
   anthropic: { latencyMs: number };
   qdrant: { latencyMs: number };
   ollama?: { latencyMs: number; available: boolean };
+  redis?: { latencyMs: number; available: boolean };
 }
 
 // ── Index entry (fast listing without reading all session files) ──────────────
