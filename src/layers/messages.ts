@@ -13,6 +13,13 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { selectRelevantTools } from "../adapters/gateway.js";
 import { createOllamaConfig, ollamaCompleteStream } from "../adapters/ollama.js";
+import {
+  parseServiceQuery,
+  formatBriefing,
+  formatMap,
+  getProfile,
+  INSPECT_TOOLS,
+} from "./service-intel.js";
 import type {
   ChatAdapter,
   ChatMessage,
@@ -388,6 +395,118 @@ async function fetchFabricSummary(
   }
 }
 
+// ── Service Intelligence handler ──────────────────────────────────────────────
+
+/** Fetch tool list from a fabric app's /tools endpoint */
+async function fetchToolList(service: string, port: number): Promise<string[]> {
+  try {
+    const res = await fetch(`http://${service}.fabric-sdk:${port}/tools/list`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { tools?: Array<{ name: string }> };
+    return (data.tools ?? []).map((t) => t.name);
+  } catch {
+    return [];
+  }
+}
+
+/** Call multiple tools from INSPECT_TOOLS in parallel, return merged keyed data */
+async function fetchInspectData(
+  service: string,
+  port: number,
+  app: string,
+): Promise<AnyRecord> {
+  const toolSpecs = INSPECT_TOOLS[app] ?? [];
+  const baseUrl = `http://${service}.fabric-sdk:${port}`;
+  const results = await Promise.all(
+    toolSpecs.map(async (spec) => {
+      const result = await callFabricTool(baseUrl, spec.tool, spec.args ?? {});
+      return { key: spec.key, result };
+    }),
+  );
+  const merged: AnyRecord = {};
+  for (const r of results) {
+    if (r.result != null) merged[r.key] = r.result;
+  }
+  return merged;
+}
+
+/** Format inspect data into a readable block for the CURRENT STATUS section */
+function formatInspectStatus(app: string, data: AnyRecord): string {
+  // Use the existing formatter if available, otherwise generic
+  const formatter = FORMATTERS[app];
+  if (formatter) return formatter(data);
+  return formatGeneric(app, data);
+}
+
+/** Resolve a fabric app key to its MOE_ROUTES entry for service/port info */
+function getRouteForApp(app: string): { service: string; port: number } | null {
+  const route = MOE_ROUTES.find((r) => r.app === app);
+  if (route) return { service: route.service, port: route.port };
+  // Aiana and chat aren't in MOE_ROUTES but are in profiles
+  const fallbacks: Record<string, { service: string; port: number }> = {
+    aiana: { service: "fabric-aiana", port: 8200 },
+    chat: { service: "fabric-chat", port: 8300 },
+  };
+  return fallbacks[app] ?? null;
+}
+
+/**
+ * Handle a service intelligence query.
+ * Returns the formatted response string, or null if not a service query.
+ */
+async function handleServiceIntel(content: string): Promise<string | null> {
+  const query = parseServiceQuery(content);
+  if (!query) return null;
+
+  const { app, mode } = query;
+
+  // ── Map mode: static dependency tree, no MCP calls ──────────────────────
+  if (mode === "map") {
+    return formatMap(app);
+  }
+
+  const route = getRouteForApp(app);
+
+  // ── Overview mode: summary MCP data + tool list → structured briefing ───
+  if (mode === "overview") {
+    let liveData: string | null = null;
+    let toolList: string[] = [];
+
+    if (route) {
+      [liveData, toolList] = await Promise.all([
+        fetchFabricSummary(route.service, route.port, app, content),
+        fetchToolList(route.service, route.port),
+      ]);
+    }
+
+    return formatBriefing(app, liveData, toolList);
+  }
+
+  // ── Inspect mode: deep pull all tools → extended briefing ───────────────
+  if (mode === "inspect") {
+    let liveData: string | null = null;
+    let toolList: string[] = [];
+
+    if (route) {
+      const [inspectData, tools] = await Promise.all([
+        fetchInspectData(route.service, route.port, app),
+        fetchToolList(route.service, route.port),
+      ]);
+      liveData = formatInspectStatus(app, inspectData);
+      toolList = tools;
+    }
+
+    return formatBriefing(app, liveData, toolList);
+  }
+
+  return null;
+}
+
 export interface SendResult {
   messageId: string;
   role: "assistant";
@@ -524,6 +643,29 @@ export async function sendMessage(
 
   if (session.state === "archived") {
     throw new Error(`Session ${sessionId} is archived. Resume it or create a new session.`);
+  }
+
+  // ── Service Intelligence short-circuit ─────────────────────────────────────
+  const serviceIntelResponse = await handleServiceIntel(content);
+  if (serviceIntelResponse) {
+    fireAndForget(async () => {
+      const userMsg = await adapter.addMessage({ sessionId, role: "user", content });
+      await adapter.embedAndStore(userMsg);
+      const assistantMsg = await adapter.addMessage({
+        sessionId, role: "assistant", content: serviceIntelResponse,
+        model: "deterministic", inputTokens: 0, outputTokens: 0,
+      });
+      await adapter.embedAndStore(assistantMsg);
+    });
+    return {
+      messageId: sessionId,
+      role: "assistant" as const,
+      content: serviceIntelResponse,
+      inputTokens: 0,
+      outputTokens: 0,
+      model: session.model,
+      routingLane: "deterministic" as RoutingLane,
+    };
   }
 
   // ── Deterministic short-circuit: report without LLM ───────────────────────
@@ -671,6 +813,24 @@ export async function* sendMessageStream(
 
   if (session.state === "archived") {
     yield { error: `Session ${sessionId} is archived.` };
+    return;
+  }
+
+  // ── Service Intelligence short-circuit ─────────────────────────────────────
+  const serviceIntelResponse = await handleServiceIntel(content);
+  if (serviceIntelResponse) {
+    yield { token: serviceIntelResponse };
+    yield { done: true, inputTokens: 0, outputTokens: 0, model: "deterministic" };
+
+    fireAndForget(async () => {
+      const userMsg = await adapter.addMessage({ sessionId, role: "user", content });
+      await adapter.embedAndStore(userMsg);
+      const assistantMsg = await adapter.addMessage({
+        sessionId, role: "assistant", content: serviceIntelResponse,
+        model: "deterministic", inputTokens: 0, outputTokens: 0,
+      });
+      await adapter.embedAndStore(assistantMsg);
+    });
     return;
   }
 
