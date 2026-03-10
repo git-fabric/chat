@@ -13,6 +13,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { selectRelevantTools } from "../adapters/gateway.js";
 import { createOllamaConfig, ollamaCompleteStream } from "../adapters/ollama.js";
+import { createCacheFromEnv, type RedisCache } from "../adapters/redis.js";
 import {
   parseServiceQuery,
   formatBriefing,
@@ -340,12 +341,30 @@ const FORMATTERS: Record<string, (data: AnyRecord) => string> = {
   cloudflare: formatCloudflare,
 };
 
-/** Fetch one tool from a fabric app */
+// ── Redis cache (lazy singleton) ─────────────────────────────────────────────
+
+let _cache: RedisCache | null = null;
+let _cacheInitPromise: Promise<RedisCache> | null = null;
+
+function getCache(): Promise<RedisCache> {
+  if (!_cacheInitPromise) {
+    _cacheInitPromise = createCacheFromEnv().then((c) => { _cache = c; return c; });
+  }
+  return _cacheInitPromise;
+}
+
+/** Fetch one tool from a fabric app (with Redis cache) */
 async function callFabricTool(
   baseUrl: string,
   tool: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
+  const cache = await getCache();
+
+  // Check cache first
+  const cached = await cache.get(tool, args);
+  if (cached) return cached.data;
+
   const res = await fetch(`${baseUrl}/tools/call`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -353,7 +372,12 @@ async function callFabricTool(
     signal: AbortSignal.timeout(15000),
   });
   if (!res.ok) return null;
-  return res.json();
+  const data = await res.json();
+
+  // Cache the response (fire-and-forget)
+  cache.set(tool, args, data).catch(() => {});
+
+  return data;
 }
 
 /** Fetch live data from a fabric app, pre-format into a readable report */

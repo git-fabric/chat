@@ -34,6 +34,7 @@ import {
   setEmbeddingDims,
 } from "./qdrant.js";
 import { listTools as gatewayListTools, callTool as gatewayCallTool, selectRelevantTools } from "./gateway.js";
+import { createCacheFromEnv } from "./redis.js";
 import type {
   ChatAdapter,
   ChatSession,
@@ -380,10 +381,24 @@ export function createAdapterFromEnv(): ChatAdapter {
 
       const ollamaHealth = ollamaConfig ? await pingOllama(ollamaConfig) : undefined;
 
+      // Redis health check
+      let redisHealth: { latencyMs: number; available: boolean } | undefined;
+      if (process.env.REDIS_URL) {
+        const redisStart = Date.now();
+        try {
+          const cache = await createCacheFromEnv();
+          const ok = await cache.ping();
+          redisHealth = { latencyMs: Date.now() - redisStart, available: ok };
+        } catch {
+          redisHealth = { latencyMs: Date.now() - redisStart, available: false };
+        }
+      }
+
       return {
         anthropic: { latencyMs: anthropicLatency },
         qdrant: { latencyMs: qdrantLatency },
         ...(ollamaHealth ? { ollama: ollamaHealth } : {}),
+        ...(redisHealth ? { redis: redisHealth } : {}),
       };
     },
 

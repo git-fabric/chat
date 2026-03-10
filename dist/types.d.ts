@@ -62,6 +62,10 @@ export interface ChatHealth {
         latencyMs: number;
         available: boolean;
     };
+    redis?: {
+        latencyMs: number;
+        available: boolean;
+    };
 }
 export interface SessionIndexEntry {
     id: string;

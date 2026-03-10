@@ -12,6 +12,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { selectRelevantTools } from "../adapters/gateway.js";
 import { createOllamaConfig, ollamaCompleteStream } from "../adapters/ollama.js";
+import { createCacheFromEnv } from "../adapters/redis.js";
 import { parseServiceQuery, formatBriefing, formatMap, INSPECT_TOOLS, } from "./service-intel.js";
 // ── MoE keyword router (inline, mirrors gateway moe.js) ─────────────────────
 // Used to detect which fabric app a user message is about, so we can pre-fetch
@@ -296,8 +297,22 @@ const FORMATTERS = {
     tailscale: formatTailscale,
     cloudflare: formatCloudflare,
 };
-/** Fetch one tool from a fabric app */
+// ── Redis cache (lazy singleton) ─────────────────────────────────────────────
+let _cache = null;
+let _cacheInitPromise = null;
+function getCache() {
+    if (!_cacheInitPromise) {
+        _cacheInitPromise = createCacheFromEnv().then((c) => { _cache = c; return c; });
+    }
+    return _cacheInitPromise;
+}
+/** Fetch one tool from a fabric app (with Redis cache) */
 async function callFabricTool(baseUrl, tool, args) {
+    const cache = await getCache();
+    // Check cache first
+    const cached = await cache.get(tool, args);
+    if (cached)
+        return cached.data;
     const res = await fetch(`${baseUrl}/tools/call`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -306,7 +321,10 @@ async function callFabricTool(baseUrl, tool, args) {
     });
     if (!res.ok)
         return null;
-    return res.json();
+    const data = await res.json();
+    // Cache the response (fire-and-forget)
+    cache.set(tool, args, data).catch(() => { });
+    return data;
 }
 /** Fetch live data from a fabric app, pre-format into a readable report */
 async function fetchFabricSummary(service, port, app, message) {
