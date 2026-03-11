@@ -63,6 +63,10 @@ function detectFabricApp(message: string): typeof MOE_ROUTES[number] | null {
 /** Does the message need LLM reasoning, or is a pre-formatted report sufficient? */
 function needsLlmReasoning(message: string): boolean {
   const lower = message.toLowerCase().trim();
+  // If the question matches a specific query pattern, the data answers the question — no LLM needed
+  for (const q of SPECIFIC_QUERIES) {
+    if (q.pattern.test(lower)) return false;
+  }
   // Questions need reasoning
   if (/\?$/.test(lower)) return true;
   if (/^(how|what|why|when|where|which|who|can|could|should|is|are|do|does|will|would|explain|compare|tell me|help|describe)[\s,]/.test(lower)) return true;

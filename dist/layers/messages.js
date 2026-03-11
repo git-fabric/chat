@@ -45,6 +45,11 @@ function detectFabricApp(message) {
 /** Does the message need LLM reasoning, or is a pre-formatted report sufficient? */
 function needsLlmReasoning(message) {
     const lower = message.toLowerCase().trim();
+    // If the question matches a specific query pattern, the data answers the question — no LLM needed
+    for (const q of SPECIFIC_QUERIES) {
+        if (q.pattern.test(lower))
+            return false;
+    }
     // Questions need reasoning
     if (/\?$/.test(lower))
         return true;
