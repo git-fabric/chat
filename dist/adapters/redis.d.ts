@@ -23,6 +23,6 @@ export interface RedisCache {
 export declare function createRedisCache(url: string): Promise<RedisCache>;
 /** Create a no-op cache (used when REDIS_URL is not configured) */
 export declare function createNoopCache(): RedisCache;
-/** Create the appropriate cache based on REDIS_URL env var */
+/** Get or create the cache singleton based on REDIS_URL env var */
 export declare function createCacheFromEnv(): Promise<RedisCache>;
 //# sourceMappingURL=redis.d.ts.map

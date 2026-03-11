@@ -302,18 +302,9 @@ const FORMATTERS = {
     tailscale: formatTailscale,
     cloudflare: formatCloudflare,
 };
-// ── Redis cache (lazy singleton) ─────────────────────────────────────────────
-let _cache = null;
-let _cacheInitPromise = null;
-function getCache() {
-    if (!_cacheInitPromise) {
-        _cacheInitPromise = createCacheFromEnv().then((c) => { _cache = c; return c; });
-    }
-    return _cacheInitPromise;
-}
 /** Fetch one tool from a fabric app (with Redis cache) */
 async function callFabricTool(baseUrl, tool, args) {
-    const cache = await getCache();
+    const cache = await createCacheFromEnv();
     // Check cache first
     const cached = await cache.get(tool, args);
     if (cached)
