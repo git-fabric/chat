@@ -210,24 +210,33 @@ export function createNoopCache() {
         async quit() { },
     };
 }
-/** Create the appropriate cache based on REDIS_URL env var */
-export async function createCacheFromEnv() {
+/** Singleton — only one connection per process */
+let _singleton = null;
+/** Get or create the cache singleton based on REDIS_URL env var */
+export function createCacheFromEnv() {
+    if (_singleton)
+        return _singleton;
     const redisUrl = process.env.REDIS_URL;
-    if (!redisUrl)
-        return createNoopCache();
-    try {
-        const cache = await createRedisCache(redisUrl);
-        const ok = await cache.ping();
-        if (!ok) {
-            console.error("[redis] ping failed, falling back to no-op cache");
+    if (!redisUrl) {
+        _singleton = Promise.resolve(createNoopCache());
+        return _singleton;
+    }
+    _singleton = (async () => {
+        try {
+            const cache = await createRedisCache(redisUrl);
+            const ok = await cache.ping();
+            if (!ok) {
+                console.error("[redis] ping failed, falling back to no-op cache");
+                return createNoopCache();
+            }
+            console.log("[redis] connected, MCP response caching enabled");
+            return cache;
+        }
+        catch (err) {
+            console.error(`[redis] connection failed: ${err}, falling back to no-op cache`);
             return createNoopCache();
         }
-        console.log("[redis] connected, MCP response caching enabled");
-        return cache;
-    }
-    catch (err) {
-        console.error(`[redis] connection failed: ${err}, falling back to no-op cache`);
-        return createNoopCache();
-    }
+    })();
+    return _singleton;
 }
 //# sourceMappingURL=redis.js.map
