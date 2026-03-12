@@ -66,15 +66,17 @@ function cacheKey(tool, args) {
 export function createRedisCache(url) {
     const client = new RedisClient(url, {
         maxRetriesPerRequest: 1,
-        retryStrategy(times) {
+        retryStrategy: function (times) {
             if (times > 3)
-                return null; // stop retrying
+                return undefined;
             return Math.min(times * 200, 2000);
         },
         lazyConnect: true,
     });
-    // Suppress unhandled error events (ioredis emits on connection loss)
-    client.on("error", () => { });
+    // ioredis emits 'error' on connection loss — log and continue
+    client.on("error", function redisError(err) {
+        console.error(`[redis] ${err.message}`);
+    });
     let connected = false;
     return {
         async get(tool, args) {
@@ -91,7 +93,11 @@ export function createRedisCache(url) {
         async set(tool, args, data, ttlSeconds) {
             try {
                 const key = cacheKey(tool, args);
-                const entry = { data, cachedAt: new Date().toISOString(), tool };
+                const entry = {
+                    data: data,
+                    cachedAt: new Date().toISOString(),
+                    tool: tool,
+                };
                 const ttl = ttlSeconds ?? getTtl(tool);
                 await client.set(key, JSON.stringify(entry), "EX", ttl);
             }
@@ -116,7 +122,9 @@ export function createRedisCache(url) {
             try {
                 await client.quit();
             }
-            catch { /* already closed */ }
+            catch {
+                // already closed
+            }
         },
     };
 }

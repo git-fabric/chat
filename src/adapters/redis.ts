@@ -90,24 +90,26 @@ function cacheKey(tool: string, args: Record<string, unknown>): string {
 
 /** Create a Redis-backed MCP response cache */
 export function createRedisCache(url: string): RedisCache {
-  const client = new RedisClient(url, {
+  const client: RedisClient = new RedisClient(url, {
     maxRetriesPerRequest: 1,
-    retryStrategy(times: number) {
-      if (times > 3) return null; // stop retrying
+    retryStrategy: function (times: number): number | void {
+      if (times > 3) return undefined;
       return Math.min(times * 200, 2000);
     },
     lazyConnect: true,
   });
 
-  // Suppress unhandled error events (ioredis emits on connection loss)
-  client.on("error", () => {});
+  // ioredis emits 'error' on connection loss — log and continue
+  client.on("error", function redisError(err: Error) {
+    console.error(`[redis] ${err.message}`);
+  });
 
   let connected = false;
 
   return {
-    async get(tool, args) {
+    async get(tool: string, args: Record<string, unknown>): Promise<CacheEntry | null> {
       try {
-        const raw = await client.get(cacheKey(tool, args));
+        const raw: string | null = await client.get(cacheKey(tool, args));
         if (!raw) return null;
         return JSON.parse(raw) as CacheEntry;
       } catch {
@@ -115,10 +117,14 @@ export function createRedisCache(url: string): RedisCache {
       }
     },
 
-    async set(tool, args, data, ttlSeconds) {
+    async set(tool: string, args: Record<string, unknown>, data: unknown, ttlSeconds?: number): Promise<void> {
       try {
         const key = cacheKey(tool, args);
-        const entry: CacheEntry = { data, cachedAt: new Date().toISOString(), tool };
+        const entry: CacheEntry = {
+          data: data,
+          cachedAt: new Date().toISOString(),
+          tool: tool,
+        };
         const ttl = ttlSeconds ?? getTtl(tool);
         await client.set(key, JSON.stringify(entry), "EX", ttl);
       } catch {
@@ -126,7 +132,7 @@ export function createRedisCache(url: string): RedisCache {
       }
     },
 
-    async ping() {
+    async ping(): Promise<boolean> {
       try {
         if (!connected) {
           await client.connect();
@@ -139,8 +145,12 @@ export function createRedisCache(url: string): RedisCache {
       }
     },
 
-    async quit() {
-      try { await client.quit(); } catch { /* already closed */ }
+    async quit(): Promise<void> {
+      try {
+        await client.quit();
+      } catch {
+        // already closed
+      }
     },
   };
 }
