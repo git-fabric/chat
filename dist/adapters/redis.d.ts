@@ -1,9 +1,8 @@
 /**
  * Redis cache adapter
  *
- * Thin wrapper around Redis for caching MCP tool responses.
- * Uses REDIS_URL env var. Falls back to a no-op cache when Redis
- * is unavailable — chat keeps working, just uncached.
+ * Cache layer for MCP tool responses. Uses ioredis.
+ * Falls back to a no-op cache when Redis is unavailable.
  *
  * Keys:  mcp:<tool>:<hash(args)>
  * TTL:   Configurable per-tool, defaults to 60s
@@ -20,7 +19,7 @@ export interface RedisCache {
     quit(): Promise<void>;
 }
 /** Create a Redis-backed MCP response cache */
-export declare function createRedisCache(url: string): Promise<RedisCache>;
+export declare function createRedisCache(url: string): RedisCache;
 /** Create a no-op cache (used when REDIS_URL is not configured) */
 export declare function createNoopCache(): RedisCache;
 /** Get or create the cache singleton based on REDIS_URL env var */
