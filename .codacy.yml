@@ -1,0 +1,19 @@
+---
+engines:
+  eslint:
+    enabled: true
+    exclude_paths:
+      - "dist/**"
+      - "node_modules/**"
+      - "bin/**"
+  duplication:
+    enabled: true
+    exclude_paths:
+      - "dist/**"
+      - "node_modules/**"
+exclude_paths:
+  - "dist/**"
+  - "node_modules/**"
+  - "bin/**"
+  - "*.js"
+  - "*.d.ts"
