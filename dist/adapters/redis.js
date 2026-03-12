@@ -1,14 +1,14 @@
 /**
  * Redis cache adapter
  *
- * Thin wrapper around Redis for caching MCP tool responses.
- * Uses REDIS_URL env var. Falls back to a no-op cache when Redis
- * is unavailable — chat keeps working, just uncached.
+ * Cache layer for MCP tool responses. Uses ioredis.
+ * Falls back to a no-op cache when Redis is unavailable.
  *
  * Keys:  mcp:<tool>:<hash(args)>
  * TTL:   Configurable per-tool, defaults to 60s
  */
 import { createHash } from "crypto";
+import { Redis as RedisClient } from "ioredis";
 // ── TTL configuration per tool category ──────────────────────────────────────
 const TOOL_TTLS = {
     // Status/health endpoints — refresh frequently
@@ -61,109 +61,25 @@ function cacheKey(tool, args) {
         .slice(0, 12);
     return `mcp:${tool}:${argsHash}`;
 }
-async function createRedisConnection(url) {
-    const { createConnection } = await import("net");
-    const parsed = new URL(url);
-    const host = parsed.hostname || "127.0.0.1";
-    const port = parseInt(parsed.port || "6379", 10);
-    const password = parsed.password || undefined;
-    return new Promise((resolve, reject) => {
-        const socket = createConnection({ host, port }, async () => {
-            const conn = {
-                connected: true,
-                async command(cmd, ...args) {
-                    if (!conn.connected)
-                        return null;
-                    return new Promise((res, rej) => {
-                        // Build RESP array
-                        const parts = [cmd, ...args];
-                        let resp = `*${parts.length}\r\n`;
-                        for (const p of parts) {
-                            resp += `$${Buffer.byteLength(p)}\r\n${p}\r\n`;
-                        }
-                        let data = "";
-                        const onData = (chunk) => {
-                            data += chunk.toString();
-                            // Simple RESP parser — handles bulk strings, simple strings, integers, nulls, errors
-                            if (data.startsWith("$-1\r\n")) {
-                                socket.removeListener("data", onData);
-                                res(null);
-                            }
-                            else if (data.startsWith("$")) {
-                                const nlIdx = data.indexOf("\r\n");
-                                if (nlIdx === -1)
-                                    return; // wait for more data
-                                const len = parseInt(data.slice(1, nlIdx), 10);
-                                const expectedTotal = nlIdx + 2 + len + 2;
-                                if (data.length >= expectedTotal) {
-                                    socket.removeListener("data", onData);
-                                    res(data.slice(nlIdx + 2, nlIdx + 2 + len));
-                                }
-                            }
-                            else if (data.startsWith("+")) {
-                                const nlIdx = data.indexOf("\r\n");
-                                if (nlIdx !== -1) {
-                                    socket.removeListener("data", onData);
-                                    res(data.slice(1, nlIdx));
-                                }
-                            }
-                            else if (data.startsWith(":")) {
-                                const nlIdx = data.indexOf("\r\n");
-                                if (nlIdx !== -1) {
-                                    socket.removeListener("data", onData);
-                                    res(data.slice(1, nlIdx));
-                                }
-                            }
-                            else if (data.startsWith("-")) {
-                                const nlIdx = data.indexOf("\r\n");
-                                if (nlIdx !== -1) {
-                                    socket.removeListener("data", onData);
-                                    rej(new Error(data.slice(1, nlIdx)));
-                                }
-                            }
-                        };
-                        socket.on("data", onData);
-                        socket.write(resp);
-                    });
-                },
-                async close() {
-                    conn.connected = false;
-                    socket.destroy();
-                },
-            };
-            // Authenticate if password is set
-            if (password) {
-                try {
-                    await conn.command("AUTH", password);
-                }
-                catch {
-                    conn.connected = false;
-                    socket.destroy();
-                    reject(new Error("Redis AUTH failed"));
-                    return;
-                }
-            }
-            resolve(conn);
-        });
-        socket.on("error", () => {
-            reject(new Error(`Redis connection failed: ${host}:${port}`));
-        });
-        // 5s connection timeout
-        socket.setTimeout(5000, () => {
-            socket.destroy();
-            reject(new Error("Redis connection timeout"));
-        });
-    });
-}
 // ── Public API ───────────────────────────────────────────────────────────────
 /** Create a Redis-backed MCP response cache */
-export async function createRedisCache(url) {
-    const conn = await createRedisConnection(url);
+export function createRedisCache(url) {
+    const client = new RedisClient(url, {
+        maxRetriesPerRequest: 1,
+        retryStrategy(times) {
+            if (times > 3)
+                return null; // stop retrying
+            return Math.min(times * 200, 2000);
+        },
+        lazyConnect: true,
+    });
+    // Suppress unhandled error events (ioredis emits on connection loss)
+    client.on("error", () => { });
+    let connected = false;
     return {
         async get(tool, args) {
             try {
-                const key = cacheKey(tool, args);
-                const raw = await conn.command("GET", key);
+                const raw = await client.get(cacheKey(tool, args));
                 if (!raw)
                     return null;
                 return JSON.parse(raw);
@@ -175,13 +91,9 @@ export async function createRedisCache(url) {
         async set(tool, args, data, ttlSeconds) {
             try {
                 const key = cacheKey(tool, args);
-                const entry = {
-                    data,
-                    cachedAt: new Date().toISOString(),
-                    tool,
-                };
+                const entry = { data, cachedAt: new Date().toISOString(), tool };
                 const ttl = ttlSeconds ?? getTtl(tool);
-                await conn.command("SET", key, JSON.stringify(entry), "EX", String(ttl));
+                await client.set(key, JSON.stringify(entry), "EX", ttl);
             }
             catch {
                 // Cache write failure is non-fatal
@@ -189,7 +101,11 @@ export async function createRedisCache(url) {
         },
         async ping() {
             try {
-                const res = await conn.command("PING");
+                if (!connected) {
+                    await client.connect();
+                    connected = true;
+                }
+                const res = await client.ping();
                 return res === "PONG";
             }
             catch {
@@ -197,7 +113,10 @@ export async function createRedisCache(url) {
             }
         },
         async quit() {
-            await conn.close();
+            try {
+                await client.quit();
+            }
+            catch { /* already closed */ }
         },
     };
 }
@@ -210,7 +129,7 @@ export function createNoopCache() {
         async quit() { },
     };
 }
-/** Singleton — only one connection per process */
+/** Singleton — one cache per process */
 let _singleton = null;
 /** Get or create the cache singleton based on REDIS_URL env var */
 export function createCacheFromEnv() {
@@ -223,7 +142,7 @@ export function createCacheFromEnv() {
     }
     _singleton = (async () => {
         try {
-            const cache = await createRedisCache(redisUrl);
+            const cache = createRedisCache(redisUrl);
             const ok = await cache.ping();
             if (!ok) {
                 console.error("[redis] ping failed, falling back to no-op cache");
