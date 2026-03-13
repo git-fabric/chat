@@ -118,7 +118,7 @@ const SPECIFIC_QUERIES = [
     { pattern: /acl|access control|policy/i, app: "tailscale", tool: "ts_get_acl" },
     { pattern: /dns|nameserver/i, app: "tailscale", tool: "ts_get_dns" },
     // Cloudflare
-    { pattern: /dns record|record/i, app: "cloudflare", tool: "cf_list_dns_records" },
+    { pattern: /dns record|record/i, app: "cloudflare", tool: "cf_list_zones" },
     { pattern: /analytic|traffic|bandwidth/i, app: "cloudflare", tool: "cf_zone_analytics" },
     // Git
     { pattern: /pull request|pr /i, app: "git", tool: "git_pr_list" },
@@ -357,9 +357,15 @@ async function fetchFabricSummary(service, port, app, message) {
             }
             data = merged;
         }
-        const formatter = FORMATTERS[app];
-        if (formatter)
-            return formatter(data);
+        // Specific queries (single tool, key "result") bypass app-level formatters
+        // because those formatters expect summary-shaped data (e.g. {cluster, nodes}).
+        // Generic formatter handles arrays and objects from any tool.
+        const isSpecificQuery = toolSpecs.length === 1 && toolSpecs[0].key === "result";
+        if (!isSpecificQuery) {
+            const formatter = FORMATTERS[app];
+            if (formatter)
+                return formatter(data);
+        }
         return formatGeneric(app, data);
     }
     catch {
