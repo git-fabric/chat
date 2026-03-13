@@ -40,7 +40,17 @@ function detectFabricApp(message) {
             best = { route, score };
         }
     }
-    return best ? best.route : null;
+    if (best)
+        return best.route;
+    // Fallback: check SPECIFIC_QUERIES patterns for app resolution
+    for (const q of SPECIFIC_QUERIES) {
+        if (q.pattern.test(lower)) {
+            const route = MOE_ROUTES.find((r) => r.app === q.app);
+            if (route)
+                return route;
+        }
+    }
+    return null;
 }
 /** Does the message need LLM reasoning, or is a pre-formatted report sufficient? */
 function needsLlmReasoning(message) {
