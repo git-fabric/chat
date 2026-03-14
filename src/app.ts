@@ -13,6 +13,7 @@
  *   Context  : chat_context_inject
  *   Status   : chat_status, chat_health
  *   Threading: chat_thread_fork
+ *   Intel    : chat_briefing
  */
 
 import { createAdapterFromEnv } from "./adapters/env.js";
@@ -370,6 +371,64 @@ export function createApp(adapterOverride?: ChatAdapter): FabricApp {
           args.forkFromMessageId as string,
           args.title as string | undefined,
         ),
+    },
+
+    // ── Service Intelligence ──────────────────────────────────────────────────
+
+    {
+      name: "chat_briefing",
+      description:
+        "Generate a structured service briefing for any fabric service. " +
+        "Modes: overview (default) — 11-section briefing with live telemetry; " +
+        "inspect — deep pull all available tools; map — ASCII dependency tree. " +
+        "Trigger: 'service <name>', 'inspect <name>', or 'map <name>'.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          service: {
+            type: "string",
+            description:
+              "Service name: unifi, proxmox, k8s, cloudflare, tailscale, " +
+              "sandfly, cve, git, aiana, chat. Aliases: pve→proxmox, " +
+              "argocd→k8s, vpn→tailscale, memory→aiana, etc.",
+          },
+          mode: {
+            type: "string",
+            enum: ["overview", "inspect", "map"],
+            description: "Briefing depth. Default: overview.",
+          },
+          query: {
+            type: "string",
+            description:
+              "Optional: pass the raw user message to auto-detect service and mode.",
+          },
+        },
+      },
+      execute: async (args) => {
+        const { parseServiceQuery, resolveAppName, formatBriefing, formatMap } =
+          await import("./layers/service-intel.js");
+
+        // Auto-detect from raw query if provided
+        if (args.query) {
+          const parsed = parseServiceQuery(args.query as string);
+          if (parsed) {
+            return parsed.mode === "map"
+              ? formatMap(parsed.app)
+              : formatBriefing(parsed.app, null, null);
+          }
+        }
+
+        const app = resolveAppName(args.service as string);
+        if (!app) {
+          return `Unknown service: "${args.service}". ` +
+            "Available: unifi, proxmox, k8s, cloudflare, tailscale, sandfly, cve, git, aiana, chat";
+        }
+
+        const mode = (args.mode as string) ?? "overview";
+        return mode === "map"
+          ? formatMap(app)
+          : formatBriefing(app, null, null);
+      },
     },
   ];
 
