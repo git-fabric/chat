@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/banner.svg" alt="chat: AI conversation sessions, semantic history and context threads" width="100%"></p>
+
 # @git-fabric/chat
 
 Chat fabric app — conversation session management, semantic history search, and context threading.
@@ -120,3 +122,8 @@ This matches the fabric-sdk BGP routing model: Claude is the route of last resor
 ## License
 
 MIT
+
+<!-- org-footer -->
+---
+
+<p align="center"><sub>Part of <a href="https://github.com/git-fabric">git-fabric</a> · composable fabric apps for Git-native infrastructure · built by <a href="https://github.com/ry-ops">ry-ops</a></sub></p>
