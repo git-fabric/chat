@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 230" width="900" height="230" role="img" aria-labelledby="t d">
+  <title id="t">@git-fabric/adr</title>
+  <desc id="d">Global Architecture Decision Records for git-fabric</desc>
+  <defs>
+    <pattern id="g" width="22" height="22" patternUnits="userSpaceOnUse"><path d="M22 0H0V22" fill="none" stroke="#161b22"/></pattern>
+    <linearGradient id="u" x1="0" x2="1"><stop offset="0" stop-color="#a371f7"/><stop offset=".5" stop-color="#a371f7" stop-opacity=".25"/><stop offset="1" stop-color="#a371f7" stop-opacity="0"/></linearGradient>
+    <radialGradient id="h" cx="10%" cy="40%" r="35%"><stop offset="0" stop-color="#a371f7" stop-opacity=".16"/><stop offset="1" stop-color="#a371f7" stop-opacity="0"/></radialGradient>
+  </defs>
+  <style>
+    text{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace}
+    .pulse{animation:pulse 2.4s ease-in-out infinite}.d1{animation-delay:.4s}.d2{animation-delay:.8s}
+    @keyframes pulse{0%,100%{opacity:.45}50%{opacity:1}}
+    .step{animation:step 3s ease-in-out infinite}@keyframes step{0%,100%{opacity:.3}20%{opacity:1}}
+    .blink{animation:blink 1s steps(1) infinite}@keyframes blink{50%{opacity:0}}
+    .flash{animation:flash 3.2s ease-in-out infinite}@keyframes flash{0%,40%,100%{opacity:1}45%{opacity:.2}50%{opacity:1}55%{opacity:.3}}
+    .eq{transform-box:fill-box;transform-origin:bottom;animation:eq 1.4s ease-in-out infinite}.e1{animation-delay:-.4s}.e2{animation-delay:-.8s}
+    @keyframes eq{0%,100%{transform:scaleY(.35)}50%{transform:scaleY(1)}}
+    .dash{animation:dash 1s linear infinite}@keyframes dash{to{stroke-dashoffset:-14}}
+    .shim{animation:shim 4s ease-in-out infinite}@keyframes shim{0%,100%{opacity:.55}50%{opacity:1}}
+    @media (prefers-reduced-motion:reduce){*{animation:none!important}}
+  </style>
+  <rect x="1" y="1" width="898" height="228" rx="16" fill="#0d1117" stroke="#30363d"/>
+  <rect x="1" y="1" width="898" height="228" rx="16" fill="url(#g)"/>
+  <rect x="1" y="1" width="898" height="228" rx="16" fill="url(#h)"/>
+  <g transform="translate(90 98)"><path d="M-34-28h28c4 0 6 3 6 6v54c0-3-2-5-6-5h-28zM34-28H6c-4 0-6 3-6 6v54c0-3 2-5 6-5h28z" fill="#161b22" stroke="#a371f7" stroke-width="4" stroke-linejoin="round"/><g stroke="#a371f7" stroke-width="3" opacity=".6"><line x1="-26" y1="-14" x2="-10" y2="-14"/><line x1="-26" y1="-2" x2="-10" y2="-2"/><line x1="10" y1="-14" x2="26" y2="-14"/><line x1="10" y1="-2" x2="26" y2="-2"/></g></g>
+  <line x1="170" y1="30" x2="170" y2="172" stroke="#30363d"/>
+  <text x="196" y="56" font-size="15" fill="#8b949e">@git-fabric/</text>
+  <text x="194" y="100" font-size="40" font-weight="700" fill="#e6edf3">adr</text>
+  <text x="196" y="122" font-size="14" fill="#8b949e">Global Architecture Decision Records for git-fabric</text>
+  <rect class="shim" x="196" y="132" width="340" height="3" rx="1.5" fill="url(#u)"/>
+  <rect x="196" y="146" width="52" height="24" rx="12" fill="#a371f7" fill-opacity=".12" stroke="#a371f7" stroke-opacity=".7"/><text x="222" y="162" text-anchor="middle" font-size="12" fill="#a371f7">ADRs</text><rect x="258" y="146" width="98" height="24" rx="12" fill="#58a6ff" fill-opacity=".12" stroke="#58a6ff" stroke-opacity=".7"/><text x="307" y="162" text-anchor="middle" font-size="12" fill="#58a6ff">Governance</text><rect x="366" y="146" width="68" height="24" rx="12" fill="#3fb950" fill-opacity=".12" stroke="#3fb950" stroke-opacity=".7"/><text x="400" y="162" text-anchor="middle" font-size="12" fill="#3fb950">Synced</text>
+  <line x1="1" y1="182" x2="899" y2="182" stroke="#21262d"/>
+  <circle class="step" style="animation-delay:0.0s" cx="40" cy="204" r="4" fill="#a371f7"/><text x="52" y="208" font-size="12.5" fill="#8b949e">propose</text><text x="110.6" y="208" font-size="12" fill="#484f58">→</text><circle class="step" style="animation-delay:0.6s" cx="138.6" cy="204" r="4" fill="#a371f7"/><text x="150.6" y="208" font-size="12.5" fill="#8b949e">decide</text><text x="201.39999999999998" y="208" font-size="12" fill="#484f58">→</text><circle class="step" style="animation-delay:1.2s" cx="229.39999999999998" cy="204" r="4" fill="#a371f7"/><text x="241.39999999999998" y="208" font-size="12.5" fill="#8b949e">sync</text><text x="276.59999999999997" y="208" font-size="12" fill="#484f58">→</text><circle class="step" style="animation-delay:1.8s" cx="304.59999999999997" cy="204" r="4" fill="#a371f7"/><text x="316.59999999999997" y="208" font-size="12.5" fill="#8b949e">enforce</text>
+</svg>
