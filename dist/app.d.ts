@@ -13,12 +13,19 @@
  *   Context  : chat_context_inject
  *   Status   : chat_status, chat_health
  *   Threading: chat_thread_fork
+ *   Intel    : chat_briefing
  */
 import type { ChatAdapter } from "./types.js";
 interface FabricTool {
     name: string;
     description: string;
     inputSchema: Record<string, unknown>;
+    annotations?: {
+        readOnlyHint?: boolean;
+        destructiveHint?: boolean;
+        idempotentHint?: boolean;
+        openWorldHint?: boolean;
+    };
     execute: (args: Record<string, unknown>) => Promise<unknown>;
 }
 interface FabricApp {

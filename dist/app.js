@@ -13,6 +13,7 @@
  *   Context  : chat_context_inject
  *   Status   : chat_status, chat_health
  *   Threading: chat_thread_fork
+ *   Intel    : chat_briefing
  */
 import { createAdapterFromEnv } from "./adapters/env.js";
 import * as layers from "./layers/index.js";
@@ -24,6 +25,7 @@ export function createApp(adapterOverride) {
         {
             name: "chat_session_create",
             description: "Create a new chat session with Claude. Optionally set a system prompt, project tag, model, and title. Returns the sessionId to use in subsequent calls.",
+            annotations: { readOnlyHint: false, destructiveHint: false },
             inputSchema: {
                 type: "object",
                 properties: {
@@ -56,6 +58,7 @@ export function createApp(adapterOverride) {
         {
             name: "chat_session_list",
             description: "List recent chat sessions. Filter by project, state, and limit. Sessions are sorted by most recently updated first.",
+            annotations: { readOnlyHint: true },
             inputSchema: {
                 type: "object",
                 properties: {
@@ -83,6 +86,7 @@ export function createApp(adapterOverride) {
         {
             name: "chat_session_get",
             description: "Get full session details including message history. Use this to inspect or resume a prior conversation.",
+            annotations: { readOnlyHint: true },
             inputSchema: {
                 type: "object",
                 properties: {
@@ -98,6 +102,7 @@ export function createApp(adapterOverride) {
         {
             name: "chat_session_archive",
             description: "Archive a session. Archived sessions are hidden from the default list but remain searchable and resumable.",
+            annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
             inputSchema: {
                 type: "object",
                 properties: {
@@ -113,6 +118,7 @@ export function createApp(adapterOverride) {
         {
             name: "chat_session_delete",
             description: "Permanently delete a session and all its messages. This also removes vectors from Qdrant. Irreversible.",
+            annotations: { readOnlyHint: false, destructiveHint: true },
             inputSchema: {
                 type: "object",
                 properties: {
@@ -129,6 +135,7 @@ export function createApp(adapterOverride) {
         {
             name: "chat_message_send",
             description: "Send a message in an existing session and get a Claude response. Reconstructs full conversation history for the API call. Stores both user message and assistant response. Returns the assistant reply with token usage.",
+            annotations: { readOnlyHint: false, destructiveHint: false },
             inputSchema: {
                 type: "object",
                 properties: {
@@ -152,6 +159,7 @@ export function createApp(adapterOverride) {
         {
             name: "chat_message_list",
             description: "List messages in a session with pagination. Returns messages in chronological order.",
+            annotations: { readOnlyHint: true },
             inputSchema: {
                 type: "object",
                 properties: {
@@ -176,6 +184,7 @@ export function createApp(adapterOverride) {
         {
             name: "chat_search",
             description: "Semantic search over all stored conversation content using vector similarity. Finds messages relevant to the query even if exact words don't match. Optionally scope to a project or specific session.",
+            annotations: { readOnlyHint: true },
             inputSchema: {
                 type: "object",
                 properties: {
@@ -208,6 +217,7 @@ export function createApp(adapterOverride) {
         {
             name: "chat_context_inject",
             description: "Inject external context into a session before the next message send. Use this to pipe in Aiana memory recall, documentation snippets, or runtime state. The injected content is stored as a message and included in the next completion call.",
+            annotations: { readOnlyHint: false, destructiveHint: false },
             inputSchema: {
                 type: "object",
                 properties: {
@@ -233,6 +243,7 @@ export function createApp(adapterOverride) {
         {
             name: "chat_status",
             description: "Return aggregate stats: total sessions, total messages, and tokens consumed today. Useful for quota monitoring and observability.",
+            annotations: { readOnlyHint: true },
             inputSchema: {
                 type: "object",
                 properties: {},
@@ -242,6 +253,7 @@ export function createApp(adapterOverride) {
         {
             name: "chat_health",
             description: "Ping Anthropic and Qdrant services. Returns latency for each. Use to verify the app is operational before sending messages.",
+            annotations: { readOnlyHint: true },
             inputSchema: {
                 type: "object",
                 properties: {},
@@ -262,6 +274,7 @@ export function createApp(adapterOverride) {
         {
             name: "chat_thread_fork",
             description: "Fork a session at a specific message to explore an alternative branch of conversation. Creates a new session with all history up to and including the fork point. The original session is unchanged.",
+            annotations: { readOnlyHint: false, destructiveHint: false },
             inputSchema: {
                 type: "object",
                 properties: {
@@ -281,6 +294,56 @@ export function createApp(adapterOverride) {
                 required: ["sessionId", "forkFromMessageId"],
             },
             execute: async (args) => layers.sessions.forkSession(adapter, args.sessionId, args.forkFromMessageId, args.title),
+        },
+        // ── Service Intelligence ──────────────────────────────────────────────────
+        {
+            name: "chat_briefing",
+            description: "Generate a structured service briefing for any fabric service. " +
+                "Modes: overview (default) — 11-section briefing with live telemetry; " +
+                "inspect — deep pull all available tools; map — ASCII dependency tree. " +
+                "Trigger: 'service <name>', 'inspect <name>', or 'map <name>'.",
+            annotations: { readOnlyHint: true },
+            inputSchema: {
+                type: "object",
+                properties: {
+                    service: {
+                        type: "string",
+                        description: "Service name: unifi, proxmox, k8s, cloudflare, tailscale, " +
+                            "sandfly, cve, git, aiana, chat. Aliases: pve→proxmox, " +
+                            "argocd→k8s, vpn→tailscale, memory→aiana, etc.",
+                    },
+                    mode: {
+                        type: "string",
+                        enum: ["overview", "inspect", "map"],
+                        description: "Briefing depth. Default: overview.",
+                    },
+                    query: {
+                        type: "string",
+                        description: "Optional: pass the raw user message to auto-detect service and mode.",
+                    },
+                },
+            },
+            execute: async (args) => {
+                const { parseServiceQuery, resolveAppName, formatBriefing, formatMap } = await import("./layers/service-intel.js");
+                // Auto-detect from raw query if provided
+                if (args.query) {
+                    const parsed = parseServiceQuery(args.query);
+                    if (parsed) {
+                        return parsed.mode === "map"
+                            ? formatMap(parsed.app)
+                            : formatBriefing(parsed.app, null, null);
+                    }
+                }
+                const app = resolveAppName(args.service);
+                if (!app) {
+                    return `Unknown service: "${args.service}". ` +
+                        "Available: unifi, proxmox, k8s, cloudflare, tailscale, sandfly, cve, git, aiana, chat";
+                }
+                const mode = args.mode ?? "overview";
+                return mode === "map"
+                    ? formatMap(app)
+                    : formatBriefing(app, null, null);
+            },
         },
     ];
     return {
